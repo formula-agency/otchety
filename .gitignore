@@ -1,0 +1,7 @@
+*.env
+node_modules/
+data/
+reports/
+logs/
+credentials/
+service-account*.json
