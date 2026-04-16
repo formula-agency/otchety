@@ -544,6 +544,12 @@ function leadCreatedDate(lead) {
   return String(lead?.date_create || lead?.DATE_CREATE || '').slice(0, 10);
 }
 
+function leadUploadDate(lead) {
+  const createdDate = leadCreatedDate(lead);
+  const fallbackYear = Number(createdDate.slice(0, 4)) || new Date().getFullYear();
+  return parseDateLike(lead?.utm_term, fallbackYear) || createdDate;
+}
+
 function leadTimestamp(lead) {
   const value = lead?.date_create || lead?.DATE_CREATE || '';
   const time = Date.parse(value);
@@ -556,6 +562,10 @@ function leadPhones(lead) {
 
 function hasLeadUtm(lead) {
   return Boolean(lead?.utm_medium || lead?.utm_source || lead?.utm_campaign || lead?.utm_content || lead?.utm_term);
+}
+
+function isBitrixUploadedLead(lead) {
+  return Boolean(lead?.source_id);
 }
 
 function normalizeBitrixLead(lead) {
@@ -932,50 +942,56 @@ function firstLeadForPhone(db, phone) {
 function buildBitrixBaseReportRows(db) {
   const groups = new Map();
 
-  for (const phone of Object.keys(db.phones)) {
-    const firstLead = firstLeadForPhone(db, phone);
-    const firstDate = leadCreatedDate(firstLead);
-    if (!firstLead || !inReportPeriod(db, firstDate)) continue;
-    if (!hasLeadUtm(firstLead)) continue;
+  for (const lead of Object.values(db.bitrix_leads)) {
+    const uploadDate = leadUploadDate(lead);
+    if (!lead || !inReportPeriod(db, uploadDate)) continue;
+    if (!hasLeadUtm(lead)) continue;
+    if (!isBitrixUploadedLead(lead)) continue;
 
     const key = stableJson({
-      date: firstDate,
-      utm_medium: firstLead.utm_medium,
-      utm_source: firstLead.utm_source,
-      utm_campaign: firstLead.utm_campaign,
-      utm_content: firstLead.utm_content,
-      utm_term: firstLead.utm_term,
+      date: uploadDate,
+      utm_medium: lead.utm_medium,
+      utm_source: lead.utm_source,
+      utm_campaign: lead.utm_campaign,
+      utm_content: lead.utm_content,
+      utm_term: lead.utm_term,
     });
 
     if (!groups.has(key)) {
       groups.set(key, {
         upload_id: '',
-        upload_date: firstDate,
-        utm_medium: firstLead.utm_medium,
-        utm_source: firstLead.utm_source,
-        utm_campaign: firstLead.utm_campaign,
-        utm_content: firstLead.utm_content,
-        utm_term: firstLead.utm_term,
-        phones: [],
+        upload_date: uploadDate,
+        utm_medium: lead.utm_medium,
+        utm_source: lead.utm_source,
+        utm_campaign: lead.utm_campaign,
+        utm_content: lead.utm_content,
+        utm_term: lead.utm_term,
+        leads: [],
       });
     }
 
-    groups.get(key).phones.push(phone);
+    groups.get(key).leads.push(lead);
   }
 
   return [...groups.values()]
     .sort((a, b) => `${a.upload_date}_${a.utm_medium}_${a.utm_source}_${a.utm_campaign}_${a.utm_content}`.localeCompare(`${b.upload_date}_${b.utm_medium}_${b.utm_source}_${b.utm_campaign}_${b.utm_content}`))
     .map((group) => {
-      const phones = [...new Set(group.phones)];
-      const leadIds = [...new Set(phones.flatMap((phone) => phoneLeadIds(db, phone)))];
+      const createdLeads = group.leads;
+      const createdLeadIds = new Set(createdLeads.map((lead) => lead.id));
+      const phones = [...new Set(createdLeads.flatMap((lead) => leadPhones(lead)).filter(Boolean))];
+      const newPhones = phones.filter((phone) => {
+        const firstLead = firstLeadForPhone(db, phone);
+        return firstLead ? createdLeadIds.has(firstLead.id) : false;
+      });
+      const leadIds = [...new Set(newPhones.flatMap((phone) => phoneLeadIds(db, phone)))];
       const leads = leadIds.map((id) => db.bitrix_leads[id]).filter(Boolean);
       const convertedLeads = leads.filter((lead) => isConvertedLead(db, lead));
-      const convertedPhones = phones.filter((phone) => leadsForPhone(db, phone).some((lead) => isConvertedLead(db, lead)));
-      const lostPhones = phones.filter((phone) => {
+      const convertedPhones = newPhones.filter((phone) => leadsForPhone(db, phone).some((lead) => isConvertedLead(db, lead)));
+      const lostPhones = newPhones.filter((phone) => {
         const phoneLeads = leadsForPhone(db, phone);
         return phoneLeads.length > 0 && phoneLeads.every((lead) => isLostLead(db, lead));
       });
-      const workingPhones = phones.filter((phone) => {
+      const workingPhones = newPhones.filter((phone) => {
         const phoneLeads = leadsForPhone(db, phone);
         return phoneLeads.some((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead));
       });
@@ -989,18 +1005,19 @@ function buildBitrixBaseReportRows(db) {
         utm_campaign: group.utm_campaign,
         utm_content: group.utm_content,
         utm_term: group.utm_term,
-        row_count: phones.length,
+        row_count: createdLeads.length,
+        upload_lead_count: createdLeads.length,
         unique_phone_count: phones.length,
-        new_phone_count: phones.length,
-        reload_phone_count: 0,
-        duplicate_in_file_count: 0,
-        bitrix_lead_count: leadIds.length,
+        new_phone_count: newPhones.length,
+        reload_phone_count: Math.max(phones.length - newPhones.length, 0),
+        duplicate_in_file_count: Math.max(createdLeads.length - phones.length, 0),
+        bitrix_lead_count: createdLeads.length,
         working_phone_count: workingPhones.length,
         lost_phone_count: lostPhones.length,
         converted_phone_count: convertedPhones.length,
         converted_lead_count: convertedLeads.length,
-        cr_by_phone: percent(convertedPhones.length, phones.length),
-        cr_by_lead: percent(convertedLeads.length, phones.length),
+        cr_by_phone: percent(convertedPhones.length, newPhones.length),
+        cr_by_lead: percent(convertedLeads.length, newPhones.length),
         calls_total: '',
         calls_unique_phones: '',
         calls_duration_gte_10: '',
@@ -1034,6 +1051,7 @@ function buildBaseReportRows(db) {
 
     return {
       ...upload,
+      upload_lead_count: upload.row_count,
       bitrix_lead_count: leadIds.length,
       working_phone_count: workingPhones.length,
       lost_phone_count: lostPhones.length,
@@ -1139,6 +1157,14 @@ function ratioValue(numerator, denominator) {
   return numerator / denominator;
 }
 
+function uploadVolume(row) {
+  return Number(row.upload_lead_count ?? row.row_count ?? row.unique_phone_count ?? 0);
+}
+
+function newBaseVolume(row) {
+  return Number(row.new_phone_count ?? 0);
+}
+
 function yesNo(value) {
   return value ? 'Да' : 'Нет';
 }
@@ -1163,6 +1189,8 @@ function baseSheetColumns() {
     { header: 'Источник', value: (row) => row.utm_source },
     { header: 'Канал', value: (row) => row.utm_medium },
     { header: 'Кампания / город', value: (row) => row.utm_campaign },
+    { header: 'Объем загрузки', value: (row) => uploadVolume(row), format: 'integer' },
+    { header: 'Уникальных телефонов в загрузке', value: (row) => row.unique_phone_count, format: 'integer' },
     { header: 'Новая база', value: (row) => row.new_phone_count, format: 'integer' },
     { header: 'Перезаливы', value: (row) => row.reload_phone_count, format: 'integer' },
     { header: 'Дубли в файле', value: (row) => row.duplicate_in_file_count, format: 'integer' },
@@ -1307,13 +1335,15 @@ function buildSourceSummaryRows(baseRows) {
         period: russianMonth(row.upload_date),
         source: row.utm_source || row.utm_medium || 'Без источника',
         segment: row.utm_content || 'Без сегмента',
-        volume: 0,
+        uploadVolume: 0,
+        newBase: 0,
         converted: 0,
       });
     }
 
     const group = groups.get(key);
-    group.volume += Number(row.new_phone_count || 0);
+    group.uploadVolume += uploadVolume(row);
+    group.newBase += newBaseVolume(row);
     group.converted += Number(row.converted_lead_count || 0);
   }
 
@@ -1321,7 +1351,7 @@ function buildSourceSummaryRows(baseRows) {
     .sort((a, b) => `${a.period}_${a.source}_${a.segment}`.localeCompare(`${b.period}_${b.source}_${b.segment}`))
     .map((row) => ({
       ...row,
-      cr: ratioValue(row.converted, row.volume),
+      cr: ratioValue(row.converted, row.newBase),
     }));
 }
 
@@ -1338,13 +1368,15 @@ function buildIndicatorsValues(baseRows) {
       '',
       'База',
       'Дата создания',
-      'Объем',
+      'Объем загрузки',
+      'Новая база',
       'В работе',
       'Проиграно',
       'Сконвертировано',
       'CR',
       '',
       'Итог по источникам',
+      '',
       '',
       '',
       '',
@@ -1366,12 +1398,14 @@ function buildIndicatorsValues(baseRows) {
       '',
       '',
       '',
+      '',
       'Период',
       'Источник',
       'Сегмент',
-      'Суммарный объем',
+      'Суммарный объем загрузки',
+      'Новая база',
       'Сконвертировано лидов',
-      'CR',
+      'CR новой базы',
     ],
   ];
 
@@ -1379,7 +1413,7 @@ function buildIndicatorsValues(baseRows) {
   for (let index = 0; index < maxRows; index += 1) {
     const base = sortedBaseRows[index];
     const summary = summaryRows[index];
-    const row = Array.from({ length: 20 }, () => '');
+    const row = Array.from({ length: 22 }, () => '');
 
     if (base) {
       row[0] = index + 1;
@@ -1390,20 +1424,22 @@ function buildIndicatorsValues(baseRows) {
       row[5] = base.utm_term || '—';
       row[6] = baseLabel(base.utm_content || base.utm_source || base.utm_medium);
       row[7] = base.upload_date;
-      row[8] = base.new_phone_count;
-      row[9] = base.working_phone_count;
-      row[10] = base.lost_phone_count;
-      row[11] = base.converted_lead_count;
-      row[12] = percentValue(base.cr_by_lead);
+      row[8] = uploadVolume(base);
+      row[9] = base.new_phone_count;
+      row[10] = base.working_phone_count;
+      row[11] = base.lost_phone_count;
+      row[12] = base.converted_lead_count;
+      row[13] = percentValue(base.cr_by_lead);
     }
 
     if (summary) {
-      row[14] = summary.period;
-      row[15] = summary.source;
-      row[16] = summary.segment;
-      row[17] = summary.volume;
-      row[18] = summary.converted;
-      row[19] = summary.cr;
+      row[15] = summary.period;
+      row[16] = summary.source;
+      row[17] = summary.segment;
+      row[18] = summary.uploadVolume;
+      row[19] = summary.newBase;
+      row[20] = summary.converted;
+      row[21] = summary.cr;
     }
 
     values.push(row);
@@ -1529,7 +1565,8 @@ function buildGoogleWorksheets(db) {
         { startRow: 0, endRow: 2, startColumn: 10, endColumn: 11 },
         { startRow: 0, endRow: 2, startColumn: 11, endColumn: 12 },
         { startRow: 0, endRow: 2, startColumn: 12, endColumn: 13 },
-        { startRow: 0, endRow: 1, startColumn: 14, endColumn: 20 },
+        { startRow: 0, endRow: 2, startColumn: 13, endColumn: 14 },
+        { startRow: 0, endRow: 1, startColumn: 15, endColumn: 22 },
       ],
       columnFormats: [
         { index: 7, format: 'date', startRowIndex: 2 },
@@ -1537,10 +1574,12 @@ function buildGoogleWorksheets(db) {
         { index: 9, format: 'integer', startRowIndex: 2 },
         { index: 10, format: 'integer', startRowIndex: 2 },
         { index: 11, format: 'integer', startRowIndex: 2 },
-        { index: 12, format: 'percent', startRowIndex: 2 },
-        { index: 17, format: 'integer', startRowIndex: 2 },
+        { index: 12, format: 'integer', startRowIndex: 2 },
+        { index: 13, format: 'percent', startRowIndex: 2 },
         { index: 18, format: 'integer', startRowIndex: 2 },
-        { index: 19, format: 'percent', startRowIndex: 2 },
+        { index: 19, format: 'integer', startRowIndex: 2 },
+        { index: 20, format: 'integer', startRowIndex: 2 },
+        { index: 21, format: 'percent', startRowIndex: 2 },
       ],
     },
     {
@@ -1562,11 +1601,12 @@ function buildGoogleWorksheets(db) {
       title: 'Методика',
       values: [
         ['Метрика', 'Как считается'],
-        ['Объем', 'Количество новых телефонов: номер впервые появился в реестре импортированных баз.'],
-        ['В работе', 'Новые телефоны, у которых есть лид Битрикса не в финальном успешном и не в финальном проигранном статусе.'],
-        ['Проиграно', 'Новые телефоны, у которых все найденные лиды находятся в проигранных статусах.'],
+        ['Объем загрузки', 'Лиды Битрикса с источником загрузки и указанными первичными UTM-метками. Дата выгрузки берется из utm_term, если там указана дата, иначе из даты создания лида.'],
+        ['Новая база', 'Уникальные телефоны, у которых первый найденный лид Битрикса относится к этой выгрузке.'],
+        ['В работе', 'Телефоны из новой базы, у которых есть лид Битрикса не в финальном успешном и не в финальном проигранном статусе.'],
+        ['Проиграно', 'Телефоны из новой базы, у которых все найденные лиды находятся в проигранных статусах.'],
         ['Сконвертировано', 'Количество сконвертированных лидов Битрикса, закрепленных за первой базой телефона.'],
-        ['CR', 'Сконвертировано / Объем.'],
+        ['CR', 'Сконвертировано / Новая база.'],
         ['Дозваниваемость', 'Уникальные телефоны с разговором 10 секунд и больше / уникальные телефоны, по которым были звонки.'],
         ['Пустые метки', 'Лиды без первичных UTM-меток не попадают в отчет по базам.'],
         ['Перезаливы', 'Повторные появления номера скрыты из основного отчета и хранятся на технических листах.'],
@@ -1997,8 +2037,8 @@ async function generateReports(db, reportsDir) {
     { header: 'utm_campaign', value: (row) => row.utm_campaign },
     { header: 'utm_content', value: (row) => row.utm_content },
     { header: 'utm_term', value: (row) => row.utm_term },
-    { header: 'Строк в файле', value: (row) => row.row_count },
-    { header: 'Уникальных телефонов', value: (row) => row.unique_phone_count },
+    { header: 'Объем загрузки', value: (row) => uploadVolume(row) },
+    { header: 'Уникальных телефонов в загрузке', value: (row) => row.unique_phone_count },
     { header: 'Новая база', value: (row) => row.new_phone_count },
     { header: 'Перезаливы', value: (row) => row.reload_phone_count },
     { header: 'Дубли внутри файла', value: (row) => row.duplicate_in_file_count },

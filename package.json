@@ -9,6 +9,9 @@
     "report:auto:sheets": "node src/reporting.mjs run --source bitrix --month-current --calls-today --google-sheets",
     "report:2h:sheets": "node src/reporting.mjs run --source bitrix --month-current --calls-today --google-sheets",
     "report:full-month:sheets": "node src/reporting.mjs run --source bitrix --month-current --google-sheets",
+    "report:scheduled:base": "node src/reporting.mjs run --source bitrix --month-current --skip-skorozvon --google-sheets",
+    "report:scheduled:calls-today": "node src/reporting.mjs run --source bitrix --month-current --skip-bitrix --calls-today --google-sheets",
+    "report:scheduled:calls-month": "node src/reporting.mjs run --source bitrix --month-current --skip-bitrix --google-sheets",
     "sheets": "node src/reporting.mjs run --skip-bitrix --skip-skorozvon --google-sheets"
   },
   "dependencies": {

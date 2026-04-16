@@ -55,10 +55,15 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Update full current month on cold start
-        if: ${{ steps.db-state.outputs.exists != 'true' }}
-        run: npm run report:full-month:sheets
+      - name: Update Bitrix base report
+        run: npm run report:scheduled:base
 
-      - name: Update current day on warm start
+      - name: Update Skorozvon calls for current month on cold start
+        if: ${{ steps.db-state.outputs.exists != 'true' }}
+        continue-on-error: true
+        run: npm run report:scheduled:calls-month
+
+      - name: Update Skorozvon calls for today on warm start
         if: ${{ steps.db-state.outputs.exists == 'true' }}
-        run: npm run report:2h:sheets
+        continue-on-error: true
+        run: npm run report:scheduled:calls-today
