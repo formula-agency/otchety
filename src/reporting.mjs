@@ -1123,8 +1123,6 @@ function buildBitrixBaseReportRows(db) {
         row_count: createdLeads.length,
         upload_lead_count: createdLeads.length,
         unique_phone_count: phones.length,
-        new_phone_count: '',
-        reload_phone_count: '',
         duplicate_in_file_count: Math.max(createdLeads.length - phones.length, 0),
         bitrix_lead_count: createdLeads.length,
         working_phone_count: workingLeads.length,
