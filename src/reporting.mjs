@@ -26,6 +26,14 @@ const BASE_LABELS = [
   { label: 'Реанимация', tokens: ['reanimation', 'reanim'] },
   { label: 'Карты', tokens: ['maps', 'map'] },
 ];
+const REVISION_STATUS_NAMES = [
+  'Перезвонить 30 дн',
+  'Долгосрок от 6 мес.',
+  'Добрифовать',
+  'Прошел бриф',
+  'Предконвертация',
+];
+const REVISION_STATUS_FALLBACK_IDS = new Set(['UC_PZNE6G', 'UC_SUU1DX', 'UC_5IFITJ', 'UC_F4HX04', 'UC_RGNREH']);
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -272,6 +280,7 @@ function createEmptyDb() {
     phones: {},
     bitrix_leads: {},
     bitrix_statuses: {},
+    bitrix_stage_history: {},
     skorozvon_calls: {},
   };
 }
@@ -568,6 +577,33 @@ function isBitrixUploadedLead(lead) {
   return Boolean(lead?.source_id);
 }
 
+function unprocessedStatusIds(db) {
+  const ids = Object.values(db.bitrix_statuses ?? {})
+    .filter((status) => String(status.name || '').trim().toLowerCase() === 'необработанное')
+    .map((status) => status.status_id);
+  return new Set(ids.length > 0 ? ids : ['IN_PROCESS']);
+}
+
+function isUnprocessedStatus(db, statusId) {
+  return unprocessedStatusIds(db).has(String(statusId || ''));
+}
+
+function normalizeStatusName(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function revisionStatusIds(db) {
+  const revisionNames = new Set(REVISION_STATUS_NAMES.map(normalizeStatusName));
+  const ids = Object.values(db.bitrix_statuses ?? {})
+    .filter((status) => revisionNames.has(normalizeStatusName(status.name)))
+    .map((status) => status.status_id);
+  return new Set(ids.length > 0 ? ids : [...REVISION_STATUS_FALLBACK_IDS]);
+}
+
+function isRevisionStatus(db, statusId) {
+  return revisionStatusIds(db).has(String(statusId || ''));
+}
+
 function normalizeBitrixLead(lead) {
   return {
     id: String(lead.ID),
@@ -622,6 +658,69 @@ function updatePhoneRegistryFromLead(db, lead) {
     ids.add(lead.id);
     db.phones[phone].bitrix_lead_ids = [...ids].sort((a, b) => Number(a) - Number(b));
   }
+}
+
+function normalizeBitrixStageHistoryItem(item) {
+  return {
+    id: String(item.ID),
+    owner_id: String(item.OWNER_ID),
+    type_id: String(item.TYPE_ID ?? ''),
+    status_id: item.STATUS_ID || item.STAGE_ID || '',
+    created_time: item.CREATED_TIME || '',
+  };
+}
+
+function upsertBitrixStageHistory(db, ownerId, items) {
+  db.bitrix_stage_history ??= {};
+  const existing = new Map((db.bitrix_stage_history[String(ownerId)] ?? []).map((item) => [String(item.id), item]));
+
+  for (const item of items) {
+    const normalized = normalizeBitrixStageHistoryItem(item);
+    if (!normalized.id) continue;
+    existing.set(normalized.id, normalized);
+  }
+
+  db.bitrix_stage_history[String(ownerId)] = [...existing.values()]
+    .sort((a, b) => `${a.created_time}_${a.id}`.localeCompare(`${b.created_time}_${b.id}`));
+}
+
+function stageHistoryCommand(leadId) {
+  const params = [
+    ['entityTypeId', '1'],
+    ['order[ID]', 'ASC'],
+    ['filter[OWNER_ID]', String(leadId)],
+    ['select[0]', 'ID'],
+    ['select[1]', 'OWNER_ID'],
+    ['select[2]', 'TYPE_ID'],
+    ['select[3]', 'STATUS_ID'],
+    ['select[4]', 'CREATED_TIME'],
+  ];
+  const query = params.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+  return `crm.stagehistory.list?${query}`;
+}
+
+async function syncBitrixStageHistoryForLeads(db, leadIds) {
+  const ids = [...new Set(leadIds.map(String).filter(Boolean))];
+  if (ids.length === 0) return { leadCount: 0, historyCount: 0 };
+
+  const webhookUrl = getBitrixWebhookUrl();
+  let historyCount = 0;
+
+  for (const group of chunks(ids, BITRIX_BATCH_SIZE)) {
+    const commands = {};
+    group.forEach((id) => {
+      commands[`history_${id}`] = stageHistoryCommand(id);
+    });
+
+    const results = await bitrixBatch(webhookUrl, commands);
+    for (const id of group) {
+      const items = results[`history_${id}`]?.items ?? [];
+      upsertBitrixStageHistory(db, id, items);
+      historyCount += items.length;
+    }
+  }
+
+  return { leadCount: ids.length, historyCount };
 }
 
 async function syncBitrixForPhones(db, phones) {
@@ -729,11 +828,13 @@ async function fetchBitrixLeadsCreatedRange(db, fromIso, toIso) {
 
   const phones = [...new Set(leads.flatMap((lead) => lead.phones).filter(Boolean))];
   const duplicates = await syncBitrixForPhones(db, phones);
+  const stageHistory = await syncBitrixStageHistoryForLeads(db, leads.map((lead) => lead.id));
 
   return {
     leadCount: leads.length,
     phoneCount: phones.length,
     duplicateLeadCount: duplicates.leadCount,
+    stageHistoryCount: stageHistory.historyCount,
   };
 }
 
@@ -939,6 +1040,28 @@ function firstLeadForPhone(db, phone) {
   return leadsForPhone(db, phone).sort((a, b) => leadTimestamp(a) - leadTimestamp(b))[0] ?? null;
 }
 
+function leadStageHistory(db, leadId) {
+  return [...(db.bitrix_stage_history?.[String(leadId)] ?? [])]
+    .sort((a, b) => `${a.created_time}_${a.id}`.localeCompare(`${b.created_time}_${b.id}`));
+}
+
+function leadRoundNumber(db, lead) {
+  const history = leadStageHistory(db, lead.id);
+  let rounds = 0;
+  let previousStatus = '';
+
+  for (const item of history) {
+    const statusId = item.status_id || '';
+    if (isUnprocessedStatus(db, statusId) && !isUnprocessedStatus(db, previousStatus)) {
+      rounds += 1;
+    }
+    previousStatus = statusId;
+  }
+
+  if (rounds === 0 && isUnprocessedStatus(db, lead.status_id)) return 1;
+  return rounds;
+}
+
 function buildBitrixBaseReportRows(db) {
   const groups = new Map();
 
@@ -947,9 +1070,11 @@ function buildBitrixBaseReportRows(db) {
     if (!lead || !inReportPeriod(db, uploadDate)) continue;
     if (!hasLeadUtm(lead)) continue;
     if (!isBitrixUploadedLead(lead)) continue;
+    const roundNumber = leadRoundNumber(db, lead);
 
     const key = stableJson({
       date: uploadDate,
+      round_number: roundNumber,
       utm_medium: lead.utm_medium,
       utm_source: lead.utm_source,
       utm_campaign: lead.utm_campaign,
@@ -961,6 +1086,7 @@ function buildBitrixBaseReportRows(db) {
       groups.set(key, {
         upload_id: '',
         upload_date: uploadDate,
+        round_number: roundNumber,
         utm_medium: lead.utm_medium,
         utm_source: lead.utm_source,
         utm_campaign: lead.utm_campaign,
@@ -974,32 +1100,21 @@ function buildBitrixBaseReportRows(db) {
   }
 
   return [...groups.values()]
-    .sort((a, b) => `${a.upload_date}_${a.utm_medium}_${a.utm_source}_${a.utm_campaign}_${a.utm_content}`.localeCompare(`${b.upload_date}_${b.utm_medium}_${b.utm_source}_${b.utm_campaign}_${b.utm_content}`))
+    .sort((a, b) => `${a.upload_date}_${a.utm_medium}_${a.utm_source}_${a.utm_campaign}_${a.utm_content}_${roundSortValue(a.round_number)}`.localeCompare(`${b.upload_date}_${b.utm_medium}_${b.utm_source}_${b.utm_campaign}_${b.utm_content}_${roundSortValue(b.round_number)}`))
     .map((group) => {
       const createdLeads = group.leads;
-      const createdLeadIds = new Set(createdLeads.map((lead) => lead.id));
       const phones = [...new Set(createdLeads.flatMap((lead) => leadPhones(lead)).filter(Boolean))];
-      const newPhones = phones.filter((phone) => {
-        const firstLead = firstLeadForPhone(db, phone);
-        return firstLead ? createdLeadIds.has(firstLead.id) : false;
-      });
-      const leadIds = [...new Set(newPhones.flatMap((phone) => phoneLeadIds(db, phone)))];
-      const leads = leadIds.map((id) => db.bitrix_leads[id]).filter(Boolean);
-      const convertedLeads = leads.filter((lead) => isConvertedLead(db, lead));
-      const convertedPhones = newPhones.filter((phone) => leadsForPhone(db, phone).some((lead) => isConvertedLead(db, lead)));
-      const lostPhones = newPhones.filter((phone) => {
-        const phoneLeads = leadsForPhone(db, phone);
-        return phoneLeads.length > 0 && phoneLeads.every((lead) => isLostLead(db, lead));
-      });
-      const workingPhones = newPhones.filter((phone) => {
-        const phoneLeads = leadsForPhone(db, phone);
-        return phoneLeads.some((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead));
-      });
+      const convertedLeads = createdLeads.filter((lead) => isConvertedLead(db, lead));
+      const lostLeads = createdLeads.filter((lead) => isLostLead(db, lead));
+      const revisionLeads = createdLeads.filter((lead) => isRevisionStatus(db, lead.status_id));
+      const workingLeads = createdLeads.filter((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead) && !isRevisionStatus(db, lead.status_id));
+      const convertedPhones = phones.filter((phone) => createdLeads.some((lead) => leadPhones(lead).includes(phone) && isConvertedLead(db, lead)));
 
       return {
         source_type: 'bitrix_api',
         upload_id: '',
         upload_date: group.upload_date,
+        round_number: group.round_number,
         utm_medium: group.utm_medium,
         utm_source: group.utm_source,
         utm_campaign: group.utm_campaign,
@@ -1008,16 +1123,17 @@ function buildBitrixBaseReportRows(db) {
         row_count: createdLeads.length,
         upload_lead_count: createdLeads.length,
         unique_phone_count: phones.length,
-        new_phone_count: newPhones.length,
-        reload_phone_count: Math.max(phones.length - newPhones.length, 0),
+        new_phone_count: '',
+        reload_phone_count: '',
         duplicate_in_file_count: Math.max(createdLeads.length - phones.length, 0),
         bitrix_lead_count: createdLeads.length,
-        working_phone_count: workingPhones.length,
-        lost_phone_count: lostPhones.length,
+        working_phone_count: workingLeads.length,
+        revision_lead_count: revisionLeads.length,
+        lost_phone_count: lostLeads.length,
         converted_phone_count: convertedPhones.length,
         converted_lead_count: convertedLeads.length,
-        cr_by_phone: percent(convertedPhones.length, newPhones.length),
-        cr_by_lead: percent(convertedLeads.length, newPhones.length),
+        cr_by_phone: percent(convertedPhones.length, phones.length),
+        cr_by_lead: percent(convertedLeads.length, createdLeads.length),
         calls_total: '',
         calls_unique_phones: '',
         calls_duration_gte_10: '',
@@ -1034,18 +1150,18 @@ function buildBaseReportRows(db) {
 
   return db.uploads.map((upload) => {
     const phones = uploadUniquePhones(db, upload.upload_id);
-    const newPhones = phones.filter((phone) => db.phones[phone]?.first_upload_id === upload.upload_id);
-    const leadIds = [...new Set(newPhones.flatMap((phone) => phoneLeadIds(db, phone)))];
+    const leadIds = [...new Set(phones.flatMap((phone) => phoneLeadIds(db, phone)))];
     const leads = leadIds.map((id) => db.bitrix_leads[id]).filter(Boolean);
     const convertedLeads = leads.filter((lead) => isConvertedLead(db, lead));
-    const convertedPhones = newPhones.filter((phone) => leadsForPhone(db, phone).some((lead) => isConvertedLead(db, lead)));
-    const lostPhones = newPhones.filter((phone) => {
+    const convertedPhones = phones.filter((phone) => leadsForPhone(db, phone).some((lead) => isConvertedLead(db, lead)));
+    const revisionPhones = phones.filter((phone) => leadsForPhone(db, phone).some((lead) => isRevisionStatus(db, lead.status_id)));
+    const lostPhones = phones.filter((phone) => {
       const phoneLeads = leadsForPhone(db, phone);
       return phoneLeads.length > 0 && phoneLeads.every((lead) => isLostLead(db, lead));
     });
-    const workingPhones = newPhones.filter((phone) => {
+    const workingPhones = phones.filter((phone) => {
       const phoneLeads = leadsForPhone(db, phone);
-      return phoneLeads.some((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead));
+      return phoneLeads.some((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead) && !isRevisionStatus(db, lead.status_id));
     });
     const callStats = aggregateCalls(callsForFirstUpload(db, upload.upload_id));
 
@@ -1054,11 +1170,12 @@ function buildBaseReportRows(db) {
       upload_lead_count: upload.row_count,
       bitrix_lead_count: leadIds.length,
       working_phone_count: workingPhones.length,
+      revision_lead_count: revisionPhones.length,
       lost_phone_count: lostPhones.length,
       converted_phone_count: convertedPhones.length,
       converted_lead_count: convertedLeads.length,
-      cr_by_phone: percent(convertedPhones.length, upload.new_phone_count),
-      cr_by_lead: percent(convertedLeads.length, upload.new_phone_count),
+      cr_by_phone: percent(convertedPhones.length, phones.length),
+      cr_by_lead: percent(convertedLeads.length, upload.row_count),
       calls_total: callStats.total,
       calls_unique_phones: callStats.unique_phone_count,
       calls_duration_gte_10: callStats.duration_gte_10,
@@ -1161,8 +1278,8 @@ function uploadVolume(row) {
   return Number(row.upload_lead_count ?? row.row_count ?? row.unique_phone_count ?? 0);
 }
 
-function newBaseVolume(row) {
-  return Number(row.new_phone_count ?? 0);
+function roundSortValue(value) {
+  return String(Number(value || 0)).padStart(6, '0');
 }
 
 function yesNo(value) {
@@ -1189,13 +1306,13 @@ function baseSheetColumns() {
     { header: 'Источник', value: (row) => row.utm_source },
     { header: 'Канал', value: (row) => row.utm_medium },
     { header: 'Кампания / город', value: (row) => row.utm_campaign },
+    { header: 'Номер круга', value: (row) => row.round_number, format: 'integer' },
     { header: 'Объем загрузки', value: (row) => uploadVolume(row), format: 'integer' },
     { header: 'Уникальных телефонов в загрузке', value: (row) => row.unique_phone_count, format: 'integer' },
-    { header: 'Новая база', value: (row) => row.new_phone_count, format: 'integer' },
-    { header: 'Перезаливы', value: (row) => row.reload_phone_count, format: 'integer' },
     { header: 'Дубли в файле', value: (row) => row.duplicate_in_file_count, format: 'integer' },
     { header: 'Лидов в Битриксе', value: (row) => row.bitrix_lead_count, format: 'integer' },
-    { header: 'В работе', value: (row) => row.working_phone_count, format: 'integer' },
+    { header: 'В процессе обработки', value: (row) => row.working_phone_count, format: 'integer' },
+    { header: 'В доработке', value: (row) => row.revision_lead_count, format: 'integer' },
     { header: 'Проиграно', value: (row) => row.lost_phone_count, format: 'integer' },
     { header: 'Сконвертировано телефонов', value: (row) => row.converted_phone_count, format: 'integer' },
     { header: 'Сконвертировано лидов', value: (row) => row.converted_lead_count, format: 'integer' },
@@ -1234,7 +1351,6 @@ function callabilitySheetColumns(firstColumnHeader = 'Дата') {
 function detailSheetColumns() {
   return [
     { header: 'Телефон', value: (row) => row.phone },
-    { header: 'Новая база', value: (row) => yesNo(row.is_new_base) },
     { header: 'Перезалив', value: (row) => yesNo(row.is_reload) },
     { header: 'Дубль в файле', value: (row) => yesNo(row.is_duplicate_in_file) },
     { header: 'Сконвертирован', value: (row) => row.converted === 'yes' ? 'Да' : 'Нет' },
@@ -1251,54 +1367,6 @@ function detailSheetColumns() {
     { header: 'utm_content', value: (row) => row.utm_content },
     { header: 'utm_term', value: (row) => row.utm_term },
   ];
-}
-
-function buildSummaryValues(baseRows, byBaseRows) {
-  const knownCallRows = byBaseRows.filter((row) => row.first_upload_id !== 'unmatched');
-  const unmatched = byBaseRows.find((row) => row.first_upload_id === 'unmatched');
-  const totalNew = baseRows.reduce((sum, row) => sum + Number(row.new_phone_count || 0), 0);
-  const totalReloads = baseRows.reduce((sum, row) => sum + Number(row.reload_phone_count || 0), 0);
-  const totalConvertedPhones = baseRows.reduce((sum, row) => sum + Number(row.converted_phone_count || 0), 0);
-  const totalConvertedLeads = baseRows.reduce((sum, row) => sum + Number(row.converted_lead_count || 0), 0);
-  const knownCalls = knownCallRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
-  const knownPhones = knownCallRows.reduce((sum, row) => sum + Number(row.unique_phone_count || 0), 0);
-  const knownPhones10 = knownCallRows.reduce((sum, row) => sum + Number(row.phones_gte_10 || 0), 0);
-  const recentRows = [...baseRows]
-    .sort((a, b) => `${b.upload_date}_${b.upload_id}`.localeCompare(`${a.upload_date}_${a.upload_id}`))
-    .slice(0, 10);
-
-  const values = [
-    ['Отчетики', '', 'Обновлено', new Date().toLocaleString('ru-RU')],
-    [''],
-    ['Ключевые показатели'],
-    ['Метрика', 'Значение', 'Комментарий'],
-    ['Загрузок', baseRows.length, 'Количество импортированных файлов/заливок'],
-    ['Новая база', totalNew, 'Телефоны, впервые попавшие в реестр'],
-    ['Перезаливы', totalReloads, 'Телефоны, которые уже были в реестре'],
-    ['Сконвертировано телефонов', totalConvertedPhones, 'Уникальные телефоны со сконвертированным лидом'],
-    ['Сконвертировано лидов', totalConvertedLeads, 'Количество сконвертированных лидов Битрикса'],
-    ['CR по телефонам', ratioValue(totalConvertedPhones, totalNew), 'Сконвертированные телефоны / новая база'],
-    ['Звонков по известным базам', knownCalls, 'Звонки Скорозвона, телефон которых найден в реестре'],
-    ['Дозвон по телефонам 10+ сек', ratioValue(knownPhones10, knownPhones), 'Телефоны с разговором 10+ сек / телефоны в звонках'],
-    ['Звонков без привязки к базе', unmatched?.total ?? 0, 'Эти номера еще не импортированы через файлы баз'],
-    [''],
-    ['Последние загрузки'],
-    ['Дата', 'База / сегмент', 'Новая база', 'Перезаливы', 'CR телефоны', 'Дозвон телефоны 10+ сек', 'upload_id'],
-  ];
-
-  for (const row of recentRows) {
-    values.push([
-      row.upload_date,
-      row.utm_content || row.upload_id,
-      row.new_phone_count,
-      row.reload_phone_count,
-      percentValue(row.cr_by_phone),
-      percentValue(row.callability_by_phones_10),
-      row.upload_id,
-    ]);
-  }
-
-  return values;
 }
 
 function russianMonth(dateIso) {
@@ -1336,14 +1404,12 @@ function buildSourceSummaryRows(baseRows) {
         source: row.utm_source || row.utm_medium || 'Без источника',
         segment: row.utm_content || 'Без сегмента',
         uploadVolume: 0,
-        newBase: 0,
         converted: 0,
       });
     }
 
     const group = groups.get(key);
     group.uploadVolume += uploadVolume(row);
-    group.newBase += newBaseVolume(row);
     group.converted += Number(row.converted_lead_count || 0);
   }
 
@@ -1351,12 +1417,12 @@ function buildSourceSummaryRows(baseRows) {
     .sort((a, b) => `${a.period}_${a.source}_${a.segment}`.localeCompare(`${b.period}_${b.source}_${b.segment}`))
     .map((row) => ({
       ...row,
-      cr: ratioValue(row.converted, row.newBase),
+      cr: ratioValue(row.converted, row.uploadVolume),
     }));
 }
 
 function buildIndicatorsValues(baseRows) {
-  const sortedBaseRows = [...baseRows].sort((a, b) => `${a.upload_date}_${a.upload_id}`.localeCompare(`${b.upload_date}_${b.upload_id}`));
+  const sortedBaseRows = [...baseRows].sort((a, b) => `${a.upload_date}_${a.upload_id}_${roundSortValue(a.round_number)}`.localeCompare(`${b.upload_date}_${b.upload_id}_${roundSortValue(b.round_number)}`));
   const summaryRows = buildSourceSummaryRows(sortedBaseRows);
   const values = [
     [
@@ -1368,15 +1434,15 @@ function buildIndicatorsValues(baseRows) {
       '',
       'База',
       'Дата создания',
+      'Номер круга',
       'Объем загрузки',
-      'Новая база',
-      'В работе',
+      'В процессе обработки',
+      'В доработке',
       'Проиграно',
       'Сконвертировано',
       'CR',
       '',
       'Итог по источникам',
-      '',
       '',
       '',
       '',
@@ -1399,13 +1465,13 @@ function buildIndicatorsValues(baseRows) {
       '',
       '',
       '',
+      '',
       'Период',
       'Источник',
       'Сегмент',
       'Суммарный объем загрузки',
-      'Новая база',
       'Сконвертировано лидов',
-      'CR новой базы',
+      'CR',
     ],
   ];
 
@@ -1424,20 +1490,20 @@ function buildIndicatorsValues(baseRows) {
       row[5] = base.utm_term || '—';
       row[6] = baseLabel(base.utm_content || base.utm_source || base.utm_medium);
       row[7] = base.upload_date;
-      row[8] = uploadVolume(base);
-      row[9] = base.new_phone_count;
+      row[8] = base.round_number;
+      row[9] = uploadVolume(base);
       row[10] = base.working_phone_count;
-      row[11] = base.lost_phone_count;
-      row[12] = base.converted_lead_count;
-      row[13] = percentValue(base.cr_by_lead);
+      row[11] = base.revision_lead_count;
+      row[12] = base.lost_phone_count;
+      row[13] = base.converted_lead_count;
+      row[14] = percentValue(base.cr_by_lead);
     }
 
     if (summary) {
-      row[15] = summary.period;
-      row[16] = summary.source;
-      row[17] = summary.segment;
-      row[18] = summary.uploadVolume;
-      row[19] = summary.newBase;
+      row[16] = summary.period;
+      row[17] = summary.source;
+      row[18] = summary.segment;
+      row[19] = summary.uploadVolume;
       row[20] = summary.converted;
       row[21] = summary.cr;
     }
@@ -1566,7 +1632,8 @@ function buildGoogleWorksheets(db) {
         { startRow: 0, endRow: 2, startColumn: 11, endColumn: 12 },
         { startRow: 0, endRow: 2, startColumn: 12, endColumn: 13 },
         { startRow: 0, endRow: 2, startColumn: 13, endColumn: 14 },
-        { startRow: 0, endRow: 1, startColumn: 15, endColumn: 22 },
+        { startRow: 0, endRow: 2, startColumn: 14, endColumn: 15 },
+        { startRow: 0, endRow: 1, startColumn: 16, endColumn: 22 },
       ],
       columnFormats: [
         { index: 7, format: 'date', startRowIndex: 2 },
@@ -1575,8 +1642,8 @@ function buildGoogleWorksheets(db) {
         { index: 10, format: 'integer', startRowIndex: 2 },
         { index: 11, format: 'integer', startRowIndex: 2 },
         { index: 12, format: 'integer', startRowIndex: 2 },
-        { index: 13, format: 'percent', startRowIndex: 2 },
-        { index: 18, format: 'integer', startRowIndex: 2 },
+        { index: 13, format: 'integer', startRowIndex: 2 },
+        { index: 14, format: 'percent', startRowIndex: 2 },
         { index: 19, format: 'integer', startRowIndex: 2 },
         { index: 20, format: 'integer', startRowIndex: 2 },
         { index: 21, format: 'percent', startRowIndex: 2 },
@@ -1602,14 +1669,14 @@ function buildGoogleWorksheets(db) {
       values: [
         ['Метрика', 'Как считается'],
         ['Объем загрузки', 'Лиды Битрикса с источником загрузки и указанными первичными UTM-метками. Дата выгрузки берется из utm_term, если там указана дата, иначе из даты создания лида.'],
-        ['Новая база', 'Уникальные телефоны, у которых первый найденный лид Битрикса относится к этой выгрузке.'],
-        ['В работе', 'Телефоны из новой базы, у которых есть лид Битрикса не в финальном успешном и не в финальном проигранном статусе.'],
-        ['Проиграно', 'Телефоны из новой базы, у которых все найденные лиды находятся в проигранных статусах.'],
-        ['Сконвертировано', 'Количество сконвертированных лидов Битрикса, закрепленных за первой базой телефона.'],
-        ['CR', 'Сконвертировано / Новая база.'],
+        ['Номер круга', 'Количество входов лида в стадию "Необработанное": первое появление в этой стадии считается первым кругом, каждый возврат из другой стадии в "Необработанное" увеличивает круг на 1.'],
+        ['В процессе обработки', 'Лиды загрузки не в финальном успешном, не в финальном проигранном статусе и не в стадиях доработки.'],
+        ['В доработке', 'Лиды в стадиях "Перезвонить 30 дн", "Долгосрок от 6 мес.", "Добрифовать", "Прошел бриф", "Предконвертация".'],
+        ['Проиграно', 'Лиды загрузки в проигранных статусах.'],
+        ['Сконвертировано', 'Сконвертированные лиды загрузки.'],
+        ['CR', 'Сконвертировано / Объем загрузки.'],
         ['Дозваниваемость', 'Уникальные телефоны с разговором 10 секунд и больше / уникальные телефоны, по которым были звонки.'],
         ['Пустые метки', 'Лиды без первичных UTM-меток не попадают в отчет по базам.'],
-        ['Перезаливы', 'Повторные появления номера скрыты из основного отчета и хранятся на технических листах.'],
       ],
       frozenRows: 1,
       headerRows: [0],
@@ -2037,14 +2104,14 @@ async function generateReports(db, reportsDir) {
     { header: 'utm_campaign', value: (row) => row.utm_campaign },
     { header: 'utm_content', value: (row) => row.utm_content },
     { header: 'utm_term', value: (row) => row.utm_term },
+    { header: 'Номер круга', value: (row) => row.round_number },
     { header: 'Объем загрузки', value: (row) => uploadVolume(row) },
     { header: 'Уникальных телефонов в загрузке', value: (row) => row.unique_phone_count },
-    { header: 'Новая база', value: (row) => row.new_phone_count },
-    { header: 'Перезаливы', value: (row) => row.reload_phone_count },
     { header: 'Дубли внутри файла', value: (row) => row.duplicate_in_file_count },
     { header: 'Лидов в Битриксе', value: (row) => row.bitrix_lead_count },
-    { header: 'В работе, телефонов', value: (row) => row.working_phone_count },
-    { header: 'Проиграно, телефонов', value: (row) => row.lost_phone_count },
+    { header: 'В процессе обработки, лидов', value: (row) => row.working_phone_count },
+    { header: 'В доработке, лидов', value: (row) => row.revision_lead_count },
+    { header: 'Проиграно, лидов', value: (row) => row.lost_phone_count },
     { header: 'Сконвертировано телефонов', value: (row) => row.converted_phone_count },
     { header: 'Сконвертировано лидов', value: (row) => row.converted_lead_count },
     { header: 'CR по телефонам', value: (row) => row.cr_by_phone },
@@ -2076,7 +2143,6 @@ async function generateReports(db, reportsDir) {
     { header: 'first_upload_id', value: (row) => row.first_upload_id },
     { header: 'Строка файла', value: (row) => row.row_number },
     { header: 'Телефон', value: (row) => row.phone },
-    { header: 'Новая база', value: (row) => row.is_new_base ? 'yes' : 'no' },
     { header: 'Перезалив', value: (row) => row.is_reload ? 'yes' : 'no' },
     { header: 'Дубль внутри файла', value: (row) => row.is_duplicate_in_file ? 'yes' : 'no' },
     { header: 'Ответственный', value: (row) => row.responsible },
@@ -2112,6 +2178,7 @@ async function run() {
   const dbPath = String(args.db || DEFAULT_DB_PATH);
   const reportsDir = String(args.out || DEFAULT_REPORTS_DIR);
   const db = await loadJson(dbPath, createEmptyDb());
+  db.bitrix_stage_history ??= {};
   const hasPeriodArgs = Boolean(
     args['month-current']
     || args.from
@@ -2150,7 +2217,7 @@ async function run() {
 
   if (db.report_context.source === 'bitrix' && !args['skip-bitrix']) {
     const result = await fetchBitrixLeadsCreatedRange(db, db.report_context.from, db.report_context.to);
-    console.log(`Bitrix range synced: ${result.leadCount} lead(s), ${result.phoneCount} phone(s), period: ${db.report_context.from}..${db.report_context.to}.`);
+    console.log(`Bitrix range synced: ${result.leadCount} lead(s), ${result.phoneCount} phone(s), ${result.stageHistoryCount} stage history item(s), period: ${db.report_context.from}..${db.report_context.to}.`);
   }
 
   if (!args['skip-bitrix'] && db.report_context.source !== 'bitrix') {
