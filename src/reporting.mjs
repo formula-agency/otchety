@@ -140,6 +140,14 @@ function safeSegment(value, fallback = 'empty') {
   return segment || fallback;
 }
 
+function normalizeContentKey(value) {
+  return safeSegment(String(value ?? '').toLowerCase(), 'empty');
+}
+
+function phoneContentRegistryKey(phone, utmContent) {
+  return `${String(phone ?? '').trim()}::${normalizeContentKey(utmContent)}`;
+}
+
 function baseLabel(value) {
   const raw = String(value ?? '').trim();
   if (!raw) return 'Без меток';
@@ -159,6 +167,57 @@ function stableJson(value) {
 
 function hashText(text) {
   return createHash('sha256').update(text).digest('hex');
+}
+
+function ensurePhoneRecord(db, phone) {
+  if (!db.phones[phone]) {
+    db.phones[phone] = {
+      phone,
+      first_upload_id: '',
+      first_seen_at: '',
+      first_source_file: '',
+      first_bitrix_lead_id: '',
+      first_upload_id_by_content: {},
+      first_seen_at_by_content: {},
+      first_source_file_by_content: {},
+      first_bitrix_lead_id_by_content: {},
+      bitrix_lead_ids: [],
+    };
+  }
+
+  db.phones[phone].first_upload_id_by_content ??= {};
+  db.phones[phone].first_seen_at_by_content ??= {};
+  db.phones[phone].first_source_file_by_content ??= {};
+  db.phones[phone].first_bitrix_lead_id_by_content ??= {};
+  db.phones[phone].bitrix_lead_ids ??= [];
+  return db.phones[phone];
+}
+
+function buildPhoneContentRegistry(db) {
+  const registry = new Set();
+
+  for (const phoneRecord of Object.values(db.phones)) {
+    if (!phoneRecord?.phone) continue;
+    for (const contentKey of Object.keys(phoneRecord.first_upload_id_by_content ?? {})) {
+      registry.add(`${phoneRecord.phone}::${contentKey}`);
+    }
+    for (const contentKey of Object.keys(phoneRecord.first_bitrix_lead_id_by_content ?? {})) {
+      registry.add(`${phoneRecord.phone}::${contentKey}`);
+    }
+  }
+
+  for (const item of db.upload_items) {
+    if (!item?.phone) continue;
+    registry.add(phoneContentRegistryKey(item.phone, item.utm_content));
+  }
+
+  for (const lead of Object.values(db.bitrix_leads)) {
+    for (const phone of leadPhones(lead)) {
+      registry.add(phoneContentRegistryKey(phone, lead.utm_content));
+    }
+  }
+
+  return registry;
 }
 
 function parseCsv(text, delimiter = ';') {
@@ -423,7 +482,7 @@ async function importUploadCsv(db, sourceFile, options) {
   }
 
   const seenInFile = new Set();
-  const registryBeforeImport = new Set(Object.keys(db.phones));
+  const registryBeforeImport = buildPhoneContentRegistry(db);
   const uniquePhones = new Set();
   let newPhoneCount = 0;
   let duplicateInFileCount = 0;
@@ -434,18 +493,20 @@ async function importUploadCsv(db, sourceFile, options) {
     seenInFile.add(row.phone);
     uniquePhones.add(row.phone);
 
-    const existedBefore = registryBeforeImport.has(row.phone);
+    const contentRegistryKey = phoneContentRegistryKey(row.phone, row.utm_content);
+    const existedBefore = registryBeforeImport.has(contentRegistryKey);
     const isNewBase = !existedBefore && !duplicateInFile;
+    const phoneRecord = ensurePhoneRecord(db, row.phone);
+    const contentKey = normalizeContentKey(row.utm_content);
 
     if (isNewBase) {
       newPhoneCount += 1;
-      db.phones[row.phone] = {
-        phone: row.phone,
-        first_upload_id: upload.upload_id,
-        first_seen_at: upload.upload_date,
-        first_source_file: upload.source_file,
-        bitrix_lead_ids: [],
-      };
+      if (!phoneRecord.first_upload_id) phoneRecord.first_upload_id = upload.upload_id;
+      if (!phoneRecord.first_seen_at) phoneRecord.first_seen_at = upload.upload_date;
+      if (!phoneRecord.first_source_file) phoneRecord.first_source_file = upload.source_file;
+      phoneRecord.first_upload_id_by_content[contentKey] = upload.upload_id;
+      phoneRecord.first_seen_at_by_content[contentKey] = upload.upload_date;
+      phoneRecord.first_source_file_by_content[contentKey] = upload.source_file;
     }
 
     db.upload_items.push({
@@ -637,26 +698,24 @@ function normalizeBitrixLead(lead) {
 function updatePhoneRegistryFromLead(db, lead) {
   for (const phone of leadPhones(lead)) {
     if (!phone) continue;
-    if (!db.phones[phone]) {
-      db.phones[phone] = {
-        phone,
-        first_upload_id: '',
-        first_seen_at: leadCreatedDate(lead),
-        first_source_file: '',
-        first_bitrix_lead_id: lead.id,
-        bitrix_lead_ids: [],
-      };
+    const phoneRecord = ensurePhoneRecord(db, phone);
+    const contentKey = normalizeContentKey(lead.utm_content);
+
+    const currentFirstLead = db.bitrix_leads[phoneRecord.first_bitrix_lead_id];
+    if (!phoneRecord.first_bitrix_lead_id || leadTimestamp(lead) < leadTimestamp(currentFirstLead)) {
+      phoneRecord.first_seen_at = leadCreatedDate(lead);
+      phoneRecord.first_bitrix_lead_id = lead.id;
     }
 
-    const currentFirstLead = db.bitrix_leads[db.phones[phone].first_bitrix_lead_id];
-    if (!db.phones[phone].first_bitrix_lead_id || leadTimestamp(lead) < leadTimestamp(currentFirstLead)) {
-      db.phones[phone].first_seen_at = leadCreatedDate(lead);
-      db.phones[phone].first_bitrix_lead_id = lead.id;
+    const currentFirstLeadByContent = db.bitrix_leads[phoneRecord.first_bitrix_lead_id_by_content[contentKey]];
+    if (!phoneRecord.first_bitrix_lead_id_by_content[contentKey] || leadTimestamp(lead) < leadTimestamp(currentFirstLeadByContent)) {
+      phoneRecord.first_seen_at_by_content[contentKey] = leadCreatedDate(lead);
+      phoneRecord.first_bitrix_lead_id_by_content[contentKey] = lead.id;
     }
 
-    const ids = new Set(db.phones[phone].bitrix_lead_ids ?? []);
+    const ids = new Set(phoneRecord.bitrix_lead_ids ?? []);
     ids.add(lead.id);
-    db.phones[phone].bitrix_lead_ids = [...ids].sort((a, b) => Number(a) - Number(b));
+    phoneRecord.bitrix_lead_ids = [...ids].sort((a, b) => Number(a) - Number(b));
   }
 }
 
@@ -1040,6 +1099,24 @@ function firstLeadForPhone(db, phone) {
   return leadsForPhone(db, phone).sort((a, b) => leadTimestamp(a) - leadTimestamp(b))[0] ?? null;
 }
 
+function firstLeadForPhoneContent(db, phone, utmContent) {
+  const phoneRecord = db.phones[phone];
+  const contentKey = normalizeContentKey(utmContent);
+  const firstLeadId = phoneRecord?.first_bitrix_lead_id_by_content?.[contentKey];
+  if (firstLeadId && db.bitrix_leads[firstLeadId]) {
+    return db.bitrix_leads[firstLeadId];
+  }
+
+  return leadsForPhone(db, phone)
+    .filter((lead) => normalizeContentKey(lead.utm_content) === contentKey)
+    .sort((a, b) => leadTimestamp(a) - leadTimestamp(b))[0] ?? null;
+}
+
+function firstUploadIdForPhoneContent(db, phone, utmContent) {
+  const contentKey = normalizeContentKey(utmContent);
+  return db.phones[phone]?.first_upload_id_by_content?.[contentKey] || db.phones[phone]?.first_upload_id || '';
+}
+
 function leadStageHistory(db, leadId) {
   return [...(db.bitrix_stage_history?.[String(leadId)] ?? [])]
     .sort((a, b) => `${a.created_time}_${a.id}`.localeCompare(`${b.created_time}_${b.id}`));
@@ -1104,6 +1181,11 @@ function buildBitrixBaseReportRows(db) {
     .map((group) => {
       const createdLeads = group.leads;
       const phones = [...new Set(createdLeads.flatMap((lead) => leadPhones(lead)).filter(Boolean))];
+      const createdLeadIds = new Set(createdLeads.map((lead) => lead.id));
+      const newPhones = phones.filter((phone) => {
+        const firstLead = firstLeadForPhoneContent(db, phone, group.utm_content);
+        return firstLead && createdLeadIds.has(firstLead.id);
+      });
       const convertedLeads = createdLeads.filter((lead) => isConvertedLead(db, lead));
       const lostLeads = createdLeads.filter((lead) => isLostLead(db, lead));
       const revisionLeads = createdLeads.filter((lead) => isRevisionStatus(db, lead.status_id));
@@ -1123,6 +1205,8 @@ function buildBitrixBaseReportRows(db) {
         row_count: createdLeads.length,
         upload_lead_count: createdLeads.length,
         unique_phone_count: phones.length,
+        new_phone_count: newPhones.length,
+        reload_phone_count: Math.max(phones.length - newPhones.length, 0),
         duplicate_in_file_count: Math.max(createdLeads.length - phones.length, 0),
         bitrix_lead_count: createdLeads.length,
         working_phone_count: workingLeads.length,
@@ -1190,7 +1274,7 @@ function buildUploadItemsRows(db) {
     const statuses = leads.map((lead) => leadName(db, lead.status_id)).filter(Boolean).join(', ');
     return {
       ...item,
-      first_upload_id: db.phones[item.phone]?.first_upload_id || '',
+      first_upload_id: firstUploadIdForPhoneContent(db, item.phone, item.utm_content),
       bitrix_lead_ids: phoneLeadIds(db, item.phone).join(','),
       bitrix_statuses: statuses,
       converted: converted ? 'yes' : 'no',
