@@ -19,6 +19,7 @@ const BITRIX_FIRST_UTM_FIELDS = {
 const BASE_LABELS = [
   { label: 'Сайты стандартные', tokens: ['site-standard', 'site_standard'] },
   { label: 'Сайты расширенные', tokens: ['site-expanded', 'site_expanded'] },
+  { label: 'Подменники', tokens: ['podmenniki', 'podmenniki_tyumen'] },
   { label: 'Телефоны', tokens: ['phone'] },
   { label: 'SMS', tokens: ['sms'] },
   { label: 'Пиксель', tokens: ['pixel'] },
@@ -1474,17 +1475,18 @@ function buildSourceSummaryRows(baseRows) {
   const groups = new Map();
 
   for (const row of baseRows.filter((item) => item.source_type !== 'bitrix_only')) {
+    const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium);
     const key = stableJson({
       period: russianMonth(row.upload_date),
       source: row.utm_source || row.utm_medium || 'Без источника',
-      segment: row.utm_content || 'Без сегмента',
+      segment: segmentLabel,
     });
 
     if (!groups.has(key)) {
       groups.set(key, {
         period: russianMonth(row.upload_date),
         source: row.utm_source || row.utm_medium || 'Без источника',
-        segment: row.utm_content || 'Без сегмента',
+        segment: segmentLabel,
         uploadVolume: 0,
         converted: 0,
       });
@@ -1601,7 +1603,7 @@ function buildReadableCallabilityRows(byBaseRows) {
     .filter((row) => row.first_upload_id !== 'unmatched')
     .map((row) => ({
       date: row.upload_date,
-      base: row.utm_content || row.first_upload_id,
+      base: baseLabel(row.utm_content || row.first_upload_id),
       calls: row.total,
       uniquePhones: row.unique_phone_count,
       calls10: row.duration_gte_10,
@@ -1703,6 +1705,14 @@ function buildGoogleWorksheets(db) {
       values: buildIndicatorsValues(baseRows),
       frozenRows: 2,
       headerRows: [0, 1],
+      columnWidths: [
+        { startIndex: 0, endIndex: 1, pixelSize: 50 },
+        { startIndex: 1, endIndex: 6, pixelSize: 130 },
+        { startIndex: 6, endIndex: 7, pixelSize: 140 },
+        { startIndex: 7, endIndex: 8, pixelSize: 115 },
+        { startIndex: 8, endIndex: 15, pixelSize: 120 },
+        { startIndex: 16, endIndex: 22, pixelSize: 135 },
+      ],
       merges: [
         { startRow: 0, endRow: 2, startColumn: 0, endColumn: 1 },
         { startRow: 0, endRow: 1, startColumn: 1, endColumn: 6 },
@@ -1736,6 +1746,10 @@ function buildGoogleWorksheets(db) {
       values: buildReadableCallabilityValues(db),
       frozenRows: 2,
       headerRows: [0, 1],
+      columnWidths: [
+        { startIndex: 0, endIndex: 1, pixelSize: 115 },
+        { startIndex: 1, endIndex: 7, pixelSize: 145 },
+      ],
       columnFormats: [
         { index: 0, format: 'date', startRowIndex: 2 },
         { index: 1, format: 'integer', startRowIndex: 2 },
@@ -1762,6 +1776,10 @@ function buildGoogleWorksheets(db) {
       ],
       frozenRows: 1,
       headerRows: [0],
+      columnWidths: [
+        { startIndex: 0, endIndex: 1, pixelSize: 220 },
+        { startIndex: 1, endIndex: 2, pixelSize: 620 },
+      ],
     },
     {
       title: 'Тех. базы',
@@ -1976,6 +1994,21 @@ function numberFormat(format) {
   return null;
 }
 
+function columnWidthRequest(sheetId, startIndex, endIndex, pixelSize) {
+  return {
+    updateDimensionProperties: {
+      range: {
+        sheetId,
+        dimension: 'COLUMNS',
+        startIndex,
+        endIndex,
+      },
+      properties: { pixelSize },
+      fields: 'pixelSize',
+    },
+  };
+}
+
 function formatRequestsForWorksheet(sheetId, worksheet, desiredIndex) {
   const rowCount = Math.max(1, worksheet.values.length);
   const columnCount = Math.max(1, worksheet.values[0]?.length ?? 1);
@@ -2026,6 +2059,10 @@ function formatRequestsForWorksheet(sheetId, worksheet, desiredIndex) {
       },
     },
   ];
+
+  for (const item of worksheet.columnWidths ?? []) {
+    requests.push(columnWidthRequest(sheetId, item.startIndex, item.endIndex, item.pixelSize));
+  }
 
   if (worksheet.filter && rowCount > 1) {
     requests.push({ clearBasicFilter: { sheetId } });
