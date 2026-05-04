@@ -79,6 +79,13 @@ function monthStartIso(dateIso = todayIsoDate()) {
   return `${dateIso.slice(0, 7)}-01`;
 }
 
+function resolveDateArg(value, fallback = '') {
+  const text = String(value ?? '').trim();
+  if (!text) return fallback;
+  if (text.toLowerCase() === 'today') return todayIsoDate();
+  return text;
+}
+
 function parseDateLike(value, fallbackYear = new Date().getFullYear()) {
   const raw = String(value ?? '').trim();
   if (!raw) return null;
@@ -1566,6 +1573,7 @@ function buildIndicatorDetailRows(baseRows) {
   const rows = [];
   const rowGroups = [];
   const rowStyles = [];
+  const merges = [];
   const sortedBaseRows = [...baseRows].sort((a, b) => `${a.upload_date}_${a.upload_id}_${roundSortValue(a.round_number)}_${a.utm_content}`.localeCompare(`${b.upload_date}_${b.upload_id}_${roundSortValue(b.round_number)}_${b.utm_content}`));
   const months = new Map();
 
@@ -1581,7 +1589,7 @@ function buildIndicatorDetailRows(baseRows) {
   for (const [key, monthRows] of [...months.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const monthTotals = summarizeBaseRows(monthRows);
     const monthRow = Array.from({ length: 15 }, () => '');
-    monthRow[6] = `Итого за ${monthTitle(`${key}-01`)}`;
+    monthRow[0] = `Итого за ${monthTitle(`${key}-01`)}`;
     monthRow[9] = monthTotals.uploadVolume;
     monthRow[10] = monthTotals.working;
     monthRow[11] = monthTotals.revision;
@@ -1590,6 +1598,7 @@ function buildIndicatorDetailRows(baseRows) {
     monthRow[14] = monthTotals.cr;
     rows.push(monthRow);
     rowStyles.push({ startRowIndex: sheetRowIndex, endRowIndex: sheetRowIndex + 1, style: 'month' });
+    merges.push({ startRow: sheetRowIndex, endRow: sheetRowIndex + 1, startColumn: 0, endColumn: 9 });
     sheetRowIndex += 1;
 
     const monthGroupStart = sheetRowIndex;
@@ -1602,8 +1611,7 @@ function buildIndicatorDetailRows(baseRows) {
     for (const [date, dayRows] of [...dates.entries()].sort(([a], [b]) => a.localeCompare(b))) {
       const dayTotals = summarizeBaseRows(dayRows);
       const dayRow = Array.from({ length: 15 }, () => '');
-      dayRow[6] = 'Итого за день';
-      dayRow[7] = date;
+      dayRow[0] = `Итого за день ${date}`;
       dayRow[9] = dayTotals.uploadVolume;
       dayRow[10] = dayTotals.working;
       dayRow[11] = dayTotals.revision;
@@ -1612,6 +1620,7 @@ function buildIndicatorDetailRows(baseRows) {
       dayRow[14] = dayTotals.cr;
       rows.push(dayRow);
       rowStyles.push({ startRowIndex: sheetRowIndex, endRowIndex: sheetRowIndex + 1, style: 'day' });
+      merges.push({ startRow: sheetRowIndex, endRow: sheetRowIndex + 1, startColumn: 0, endColumn: 9 });
       sheetRowIndex += 1;
 
       const dayGroupStart = sheetRowIndex;
@@ -1647,7 +1656,7 @@ function buildIndicatorDetailRows(baseRows) {
     }
   }
 
-  return { rows, rowGroups, rowStyles };
+  return { rows, rowGroups, rowStyles, merges };
 }
 
 function buildIndicatorsValues(baseRows) {
@@ -1733,6 +1742,7 @@ function buildIndicatorsValues(baseRows) {
     values,
     rowGroups: detailLayout.rowGroups,
     rowStyles: detailLayout.rowStyles,
+    merges: detailLayout.merges,
   };
 }
 
@@ -1867,6 +1877,7 @@ function buildGoogleWorksheets(db) {
         { startRow: 0, endRow: 2, startColumn: 13, endColumn: 14 },
         { startRow: 0, endRow: 2, startColumn: 14, endColumn: 15 },
         { startRow: 0, endRow: 1, startColumn: 16, endColumn: 22 },
+        ...(indicatorsSheet.merges ?? []),
       ],
       columnFormats: [
         { index: 7, format: 'date', startRowIndex: 2 },
@@ -2155,7 +2166,7 @@ function rowStyleFormat(style) {
     return {
       backgroundColor: color('#D1D5DB'),
       textFormat: { bold: true, foregroundColor: color('#111827'), fontSize: 10 },
-      horizontalAlignment: 'LEFT',
+      horizontalAlignment: 'CENTER',
       wrapStrategy: 'WRAP',
       verticalAlignment: 'MIDDLE',
     };
@@ -2165,7 +2176,7 @@ function rowStyleFormat(style) {
     return {
       backgroundColor: color('#F3F4F6'),
       textFormat: { bold: true, foregroundColor: color('#111827'), fontSize: 10 },
-      horizontalAlignment: 'LEFT',
+      horizontalAlignment: 'CENTER',
       wrapStrategy: 'WRAP',
       verticalAlignment: 'MIDDLE',
     };
@@ -2238,11 +2249,12 @@ function formatRequestsForWorksheet(sheet, worksheet, desiredIndex) {
           userEnteredFormat: {
             backgroundColor: color('#FFFFFF'),
             textFormat: { foregroundColor: color('#111827'), fontSize: 10 },
+            horizontalAlignment: 'CENTER',
             wrapStrategy: 'WRAP',
             verticalAlignment: 'MIDDLE',
           },
         },
-        fields: 'userEnteredFormat(backgroundColor,textFormat,wrapStrategy,verticalAlignment)',
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,wrapStrategy,verticalAlignment)',
       },
     },
     {
@@ -2525,18 +2537,18 @@ async function run() {
   const db = await loadJson(dbPath, createEmptyDb());
   db.bitrix_stage_history ??= {};
   const today = todayIsoDate();
-  const syncFrom = args['month-current']
+  const syncFrom = resolveDateArg(args['month-current']
     ? monthStartIso(today)
-    : String(args.from || args['calls-from'] || args['calls-date'] || db.report_context?.sync_from || db.report_context?.from || today);
-  const syncTo = args['month-current']
+    : args.from || args['calls-from'] || args['calls-date'] || db.report_context?.sync_from || db.report_context?.from || today, today);
+  const syncTo = resolveDateArg(args['month-current']
     ? today
-    : String(args.to || args['calls-to'] || args['calls-date'] || syncFrom);
+    : args.to || args['calls-to'] || args['calls-date'] || syncFrom, syncFrom);
   const hasExplicitReportRange = Boolean(args.from || args.to || args['report-from'] || args['report-to']);
   const explicitReportFrom = hasExplicitReportRange
-    ? String(args['report-from'] || args.from || today)
+    ? resolveDateArg(args['report-from'] || args.from || today, today)
     : null;
   const explicitReportTo = hasExplicitReportRange
-    ? String(args['report-to'] || args.to || explicitReportFrom || today)
+    ? resolveDateArg(args['report-to'] || args.to || explicitReportFrom || today, explicitReportFrom || today)
     : null;
   const explicitSource = args.source === 'bitrix' || args['bitrix-range']
     ? 'bitrix'
@@ -2567,9 +2579,9 @@ async function run() {
     const dates = args['calls-today']
       ? [today]
       : args['calls-date']
-        ? [String(args['calls-date'])]
+        ? [resolveDateArg(args['calls-date'], today)]
         : args['calls-from'] || args['month-current'] || args.from || args.to
-      ? dateRange(String(args['calls-from'] || syncFrom), String(args['calls-to'] || syncTo || args['calls-from'] || syncFrom))
+      ? dateRange(resolveDateArg(args['calls-from'] || syncFrom, syncFrom), resolveDateArg(args['calls-to'] || syncTo || args['calls-from'] || syncFrom, syncTo || syncFrom))
       : [today];
     let totalCalls = 0;
 
