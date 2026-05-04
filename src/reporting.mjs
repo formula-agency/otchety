@@ -6,7 +6,7 @@ import path from 'node:path';
 
 const DEFAULT_DB_PATH = 'data/reporting-db.json';
 const DEFAULT_REPORTS_DIR = 'reports';
-const DEFAULT_REPORT_HISTORY_FROM = '2026-03-01';
+const DEFAULT_REPORT_HISTORY_FROM = '2026-04-01';
 const BITRIX_BATCH_SIZE = 50;
 const SKOROZVON_PAGE_SIZE = 500;
 const SKOROZVON_REQUEST_DELAY_MS = 250;
