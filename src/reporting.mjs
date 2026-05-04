@@ -6,6 +6,7 @@ import path from 'node:path';
 
 const DEFAULT_DB_PATH = 'data/reporting-db.json';
 const DEFAULT_REPORTS_DIR = 'reports';
+const DEFAULT_REPORT_HISTORY_FROM = '2026-03-01';
 const BITRIX_BATCH_SIZE = 50;
 const SKOROZVON_PAGE_SIZE = 500;
 const SKOROZVON_REQUEST_DELAY_MS = 250;
@@ -1058,6 +1059,35 @@ function inReportPeriod(db, dateIso) {
   return true;
 }
 
+function historyReportRange(db, fallbackFrom = todayIsoDate(), fallbackTo = fallbackFrom) {
+  const dates = [];
+
+  for (const upload of db.uploads ?? []) {
+    if (upload?.upload_date) dates.push(upload.upload_date);
+  }
+
+  for (const lead of Object.values(db.bitrix_leads ?? {})) {
+    const uploadDate = leadUploadDate(lead);
+    if (uploadDate) dates.push(uploadDate);
+  }
+
+  for (const call of Object.values(db.skorozvon_calls ?? {})) {
+    if (call?.date) dates.push(call.date);
+  }
+
+  if (dates.length === 0) {
+    return { from: fallbackFrom, to: fallbackTo };
+  }
+
+  dates.sort();
+  const minAllowedFrom = DEFAULT_REPORT_HISTORY_FROM;
+  const computedFrom = dates[0] || fallbackFrom;
+  return {
+    from: computedFrom < minAllowedFrom ? minAllowedFrom : computedFrom,
+    to: dates.at(-1) || fallbackTo,
+  };
+}
+
 function percent(numerator, denominator) {
   if (!denominator) return '';
   return `${((numerator / denominator) * 100).toFixed(2).replace('.', ',')}%`;
@@ -1505,9 +1535,125 @@ function buildSourceSummaryRows(baseRows) {
     }));
 }
 
+function monthKey(dateIso) {
+  return String(dateIso || '').slice(0, 7);
+}
+
+function monthTitle(dateIso) {
+  const year = String(dateIso || '').slice(0, 4);
+  const month = russianMonth(dateIso);
+  return [month, year].filter(Boolean).join(' ').trim();
+}
+
+function summarizeBaseRows(rows) {
+  const uploadVolumeTotal = rows.reduce((sum, row) => sum + Number(uploadVolume(row) || 0), 0);
+  const workingTotal = rows.reduce((sum, row) => sum + Number(row.working_phone_count || 0), 0);
+  const revisionTotal = rows.reduce((sum, row) => sum + Number(row.revision_lead_count || 0), 0);
+  const lostTotal = rows.reduce((sum, row) => sum + Number(row.lost_phone_count || 0), 0);
+  const convertedTotal = rows.reduce((sum, row) => sum + Number(row.converted_lead_count || 0), 0);
+
+  return {
+    uploadVolume: uploadVolumeTotal,
+    working: workingTotal,
+    revision: revisionTotal,
+    lost: lostTotal,
+    converted: convertedTotal,
+    cr: ratioValue(convertedTotal, uploadVolumeTotal),
+  };
+}
+
+function buildIndicatorDetailRows(baseRows) {
+  const rows = [];
+  const rowGroups = [];
+  const rowStyles = [];
+  const sortedBaseRows = [...baseRows].sort((a, b) => `${a.upload_date}_${a.upload_id}_${roundSortValue(a.round_number)}_${a.utm_content}`.localeCompare(`${b.upload_date}_${b.upload_id}_${roundSortValue(b.round_number)}_${b.utm_content}`));
+  const months = new Map();
+
+  for (const row of sortedBaseRows) {
+    const key = monthKey(row.upload_date);
+    if (!months.has(key)) months.set(key, []);
+    months.get(key).push(row);
+  }
+
+  let detailCounter = 0;
+  let sheetRowIndex = 2;
+
+  for (const [key, monthRows] of [...months.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const monthTotals = summarizeBaseRows(monthRows);
+    const monthRow = Array.from({ length: 15 }, () => '');
+    monthRow[6] = `Итого за ${monthTitle(`${key}-01`)}`;
+    monthRow[9] = monthTotals.uploadVolume;
+    monthRow[10] = monthTotals.working;
+    monthRow[11] = monthTotals.revision;
+    monthRow[12] = monthTotals.lost;
+    monthRow[13] = monthTotals.converted;
+    monthRow[14] = monthTotals.cr;
+    rows.push(monthRow);
+    rowStyles.push({ startRowIndex: sheetRowIndex, endRowIndex: sheetRowIndex + 1, style: 'month' });
+    sheetRowIndex += 1;
+
+    const monthGroupStart = sheetRowIndex;
+    const dates = new Map();
+    for (const row of monthRows) {
+      if (!dates.has(row.upload_date)) dates.set(row.upload_date, []);
+      dates.get(row.upload_date).push(row);
+    }
+
+    for (const [date, dayRows] of [...dates.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      const dayTotals = summarizeBaseRows(dayRows);
+      const dayRow = Array.from({ length: 15 }, () => '');
+      dayRow[6] = 'Итого за день';
+      dayRow[7] = date;
+      dayRow[9] = dayTotals.uploadVolume;
+      dayRow[10] = dayTotals.working;
+      dayRow[11] = dayTotals.revision;
+      dayRow[12] = dayTotals.lost;
+      dayRow[13] = dayTotals.converted;
+      dayRow[14] = dayTotals.cr;
+      rows.push(dayRow);
+      rowStyles.push({ startRowIndex: sheetRowIndex, endRowIndex: sheetRowIndex + 1, style: 'day' });
+      sheetRowIndex += 1;
+
+      const dayGroupStart = sheetRowIndex;
+      for (const base of dayRows) {
+        detailCounter += 1;
+        const row = Array.from({ length: 15 }, () => '');
+        row[0] = detailCounter;
+        row[1] = base.utm_medium || '—';
+        row[2] = base.utm_source || '—';
+        row[3] = base.utm_campaign || '—';
+        row[4] = base.utm_content || '—';
+        row[5] = base.utm_term || '—';
+        row[6] = baseLabel(base.utm_content || base.utm_source || base.utm_medium);
+        row[7] = base.upload_date;
+        row[8] = base.round_number;
+        row[9] = uploadVolume(base);
+        row[10] = base.working_phone_count;
+        row[11] = base.revision_lead_count;
+        row[12] = base.lost_phone_count;
+        row[13] = base.converted_lead_count;
+        row[14] = percentValue(base.cr_by_lead);
+        rows.push(row);
+        sheetRowIndex += 1;
+      }
+
+      if (sheetRowIndex > dayGroupStart) {
+        rowGroups.push({ startIndex: dayGroupStart, endIndex: sheetRowIndex });
+      }
+    }
+
+    if (sheetRowIndex > monthGroupStart) {
+      rowGroups.push({ startIndex: monthGroupStart, endIndex: sheetRowIndex });
+    }
+  }
+
+  return { rows, rowGroups, rowStyles };
+}
+
 function buildIndicatorsValues(baseRows) {
   const sortedBaseRows = [...baseRows].sort((a, b) => `${a.upload_date}_${a.upload_id}_${roundSortValue(a.round_number)}`.localeCompare(`${b.upload_date}_${b.upload_id}_${roundSortValue(b.round_number)}`));
   const summaryRows = buildSourceSummaryRows(sortedBaseRows);
+  const detailLayout = buildIndicatorDetailRows(sortedBaseRows);
   const values = [
     [
       '№',
@@ -1559,28 +1705,16 @@ function buildIndicatorsValues(baseRows) {
     ],
   ];
 
-  const maxRows = Math.max(sortedBaseRows.length, summaryRows.length);
+  const maxRows = Math.max(detailLayout.rows.length, summaryRows.length);
   for (let index = 0; index < maxRows; index += 1) {
-    const base = sortedBaseRows[index];
+    const base = detailLayout.rows[index];
     const summary = summaryRows[index];
     const row = Array.from({ length: 22 }, () => '');
 
     if (base) {
-      row[0] = index + 1;
-      row[1] = base.utm_medium || '—';
-      row[2] = base.utm_source || '—';
-      row[3] = base.utm_campaign || '—';
-      row[4] = base.utm_content || '—';
-      row[5] = base.utm_term || '—';
-      row[6] = baseLabel(base.utm_content || base.utm_source || base.utm_medium);
-      row[7] = base.upload_date;
-      row[8] = base.round_number;
-      row[9] = uploadVolume(base);
-      row[10] = base.working_phone_count;
-      row[11] = base.revision_lead_count;
-      row[12] = base.lost_phone_count;
-      row[13] = base.converted_lead_count;
-      row[14] = percentValue(base.cr_by_lead);
+      for (let columnIndex = 0; columnIndex <= 14; columnIndex += 1) {
+        row[columnIndex] = base[columnIndex] ?? '';
+      }
     }
 
     if (summary) {
@@ -1595,7 +1729,11 @@ function buildIndicatorsValues(baseRows) {
     values.push(row);
   }
 
-  return values;
+  return {
+    values,
+    rowGroups: detailLayout.rowGroups,
+    rowStyles: detailLayout.rowStyles,
+  };
 }
 
 function buildReadableCallabilityRows(byBaseRows) {
@@ -1694,6 +1832,7 @@ function buildGoogleWorksheets(db) {
   const dailyRows = buildCallabilityDailyRows(db);
   const byBaseRows = buildCallabilityByBaseRows(db);
   const detailRows = buildUploadItemsRows(db);
+  const indicatorsSheet = buildIndicatorsValues(baseRows);
   const baseColumns = baseSheetColumns();
   const dailyColumns = callabilitySheetColumns('Дата');
   const byBaseColumns = callabilitySheetColumns('first_upload_id');
@@ -1702,9 +1841,11 @@ function buildGoogleWorksheets(db) {
   return [
     {
       title: 'Показатели',
-      values: buildIndicatorsValues(baseRows),
+      values: indicatorsSheet.values,
       frozenRows: 2,
       headerRows: [0, 1],
+      rowGroups: indicatorsSheet.rowGroups,
+      rowStyles: indicatorsSheet.rowStyles,
       columnWidths: [
         { startIndex: 0, endIndex: 1, pixelSize: 50 },
         { startIndex: 1, endIndex: 6, pixelSize: 130 },
@@ -2009,10 +2150,66 @@ function columnWidthRequest(sheetId, startIndex, endIndex, pixelSize) {
   };
 }
 
-function formatRequestsForWorksheet(sheetId, worksheet, desiredIndex) {
+function rowStyleFormat(style) {
+  if (style === 'month') {
+    return {
+      backgroundColor: color('#D1D5DB'),
+      textFormat: { bold: true, foregroundColor: color('#111827'), fontSize: 10 },
+      horizontalAlignment: 'LEFT',
+      wrapStrategy: 'WRAP',
+      verticalAlignment: 'MIDDLE',
+    };
+  }
+
+  if (style === 'day') {
+    return {
+      backgroundColor: color('#F3F4F6'),
+      textFormat: { bold: true, foregroundColor: color('#111827'), fontSize: 10 },
+      horizontalAlignment: 'LEFT',
+      wrapStrategy: 'WRAP',
+      verticalAlignment: 'MIDDLE',
+    };
+  }
+
+  return null;
+}
+
+function deleteRowGroupRequests(sheet) {
+  return [...(sheet.rowGroups ?? [])]
+    .sort((a, b) => (Number(b.depth || 0) - Number(a.depth || 0)) || (Number((b.range?.endIndex ?? 0) - (b.range?.startIndex ?? 0)) - Number((a.range?.endIndex ?? 0) - (a.range?.startIndex ?? 0))))
+    .map((group) => ({
+      deleteDimensionGroup: {
+        range: {
+          sheetId: sheet.properties.sheetId,
+          dimension: 'ROWS',
+          startIndex: group.range.startIndex,
+          endIndex: group.range.endIndex,
+        },
+      },
+    }));
+}
+
+function addRowGroupRequests(sheetId, worksheet) {
+  return [...(worksheet.rowGroups ?? [])]
+    .sort((a, b) => (Number(b.endIndex - b.startIndex) - Number(a.endIndex - a.startIndex)) || (Number(a.startIndex) - Number(b.startIndex)))
+    .map((group) => ({
+      addDimensionGroup: {
+        range: {
+          sheetId,
+          dimension: 'ROWS',
+          startIndex: group.startIndex,
+          endIndex: group.endIndex,
+        },
+      },
+    }));
+}
+
+function formatRequestsForWorksheet(sheet, worksheet, desiredIndex) {
+  const sheetId = sheet.properties.sheetId;
   const rowCount = Math.max(1, worksheet.values.length);
   const columnCount = Math.max(1, worksheet.values[0]?.length ?? 1);
   const requests = [
+    ...deleteRowGroupRequests(sheet),
     {
       updateSheetProperties: {
         properties: {
@@ -2063,6 +2260,8 @@ function formatRequestsForWorksheet(sheetId, worksheet, desiredIndex) {
   for (const item of worksheet.columnWidths ?? []) {
     requests.push(columnWidthRequest(sheetId, item.startIndex, item.endIndex, item.pixelSize));
   }
+
+  requests.push(...addRowGroupRequests(sheetId, worksheet));
 
   if (worksheet.filter && rowCount > 1) {
     requests.push({ clearBasicFilter: { sheetId } });
@@ -2137,6 +2336,27 @@ function formatRequestsForWorksheet(sheetId, worksheet, desiredIndex) {
     });
   }
 
+  for (const item of worksheet.rowStyles ?? []) {
+    const format = rowStyleFormat(item.style);
+    if (!format) continue;
+
+    requests.push({
+      repeatCell: {
+        range: {
+          sheetId,
+          startRowIndex: item.startRowIndex,
+          endRowIndex: item.endRowIndex,
+          startColumnIndex: 0,
+          endColumnIndex: columnCount,
+        },
+        cell: {
+          userEnteredFormat: format,
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,wrapStrategy,verticalAlignment)',
+      },
+    });
+  }
+
   for (const item of worksheet.columnFormats ?? []) {
     const format = numberFormat(item.format);
     if (!format) continue;
@@ -2174,8 +2394,7 @@ async function syncGoogleSheets(db) {
   const drive = google.drive({ version: 'v3', auth });
   const worksheets = buildGoogleWorksheets(db);
   const spreadsheet = await ensureSpreadsheet(sheets, drive, config, worksheets);
-  const metadata = await ensureWorksheetTabs(sheets, spreadsheet.spreadsheetId, spreadsheet.metadata, worksheets);
-  const idsByTitle = sheetIdByTitle(metadata);
+  await ensureWorksheetTabs(sheets, spreadsheet.spreadsheetId, spreadsheet.metadata, worksheets);
 
   for (const worksheet of worksheets) {
     await sheets.spreadsheets.values.clear({
@@ -2190,12 +2409,19 @@ async function syncGoogleSheets(db) {
     });
   }
 
+  const formattingMetadataResponse = await sheets.spreadsheets.get({
+    spreadsheetId: spreadsheet.spreadsheetId,
+    fields: 'sheets(properties(title,sheetId),rowGroups)',
+  });
+  const formattingMetadata = formattingMetadataResponse.data;
+  const sheetsByTitle = new Map((formattingMetadata.sheets ?? []).map((sheet) => [sheet.properties.title, sheet]));
+
   const requests = [
-    ...hideObsoleteWorksheetRequests(metadata, worksheets),
+    ...hideObsoleteWorksheetRequests(formattingMetadata, worksheets),
     ...worksheets.flatMap((worksheet, index) => {
-    const sheetId = idsByTitle.get(worksheet.title);
-    if (sheetId === undefined) return [];
-    return formatRequestsForWorksheet(sheetId, worksheet, index);
+    const sheet = sheetsByTitle.get(worksheet.title);
+    if (!sheet) return [];
+    return formatRequestsForWorksheet(sheet, worksheet, index);
     }),
   ];
 
@@ -2298,32 +2524,24 @@ async function run() {
   const reportsDir = String(args.out || DEFAULT_REPORTS_DIR);
   const db = await loadJson(dbPath, createEmptyDb());
   db.bitrix_stage_history ??= {};
-  const hasPeriodArgs = Boolean(
-    args['month-current']
-    || args.from
-    || args.to
-    || args['report-from']
-    || args['report-to']
-    || args['calls-from']
-    || args['calls-to']
-    || args['calls-date']
-  );
-  const defaultFrom = args['month-current'] ? monthStartIso(todayIsoDate()) : args.from;
-  const defaultTo = args['month-current'] ? todayIsoDate() : args.to;
-  const reportFrom = hasPeriodArgs
-    ? String(args['report-from'] || defaultFrom || args['calls-from'] || args['calls-date'] || todayIsoDate())
-    : String(db.report_context?.from || todayIsoDate());
-  const reportTo = hasPeriodArgs
-    ? String(args['report-to'] || defaultTo || args['calls-to'] || args['calls-date'] || reportFrom)
-    : String(db.report_context?.to || reportFrom);
+  const today = todayIsoDate();
+  const syncFrom = args['month-current']
+    ? monthStartIso(today)
+    : String(args.from || args['calls-from'] || args['calls-date'] || db.report_context?.sync_from || db.report_context?.from || today);
+  const syncTo = args['month-current']
+    ? today
+    : String(args.to || args['calls-to'] || args['calls-date'] || syncFrom);
+  const hasExplicitReportRange = Boolean(args.from || args.to || args['report-from'] || args['report-to']);
+  const explicitReportFrom = hasExplicitReportRange
+    ? String(args['report-from'] || args.from || today)
+    : null;
+  const explicitReportTo = hasExplicitReportRange
+    ? String(args['report-to'] || args.to || explicitReportFrom || today)
+    : null;
   const explicitSource = args.source === 'bitrix' || args['bitrix-range']
     ? 'bitrix'
     : (args.upload ? 'uploads' : null);
-  db.report_context = {
-    source: explicitSource || db.report_context?.source || 'uploads',
-    from: reportFrom,
-    to: reportTo,
-  };
+  const reportSource = explicitSource || db.report_context?.source || 'uploads';
   let activeUpload = null;
 
   if (args.upload) {
@@ -2334,12 +2552,12 @@ async function run() {
     console.log(result.message);
   }
 
-  if (db.report_context.source === 'bitrix' && !args['skip-bitrix']) {
-    const result = await fetchBitrixLeadsCreatedRange(db, db.report_context.from, db.report_context.to);
-    console.log(`Bitrix range synced: ${result.leadCount} lead(s), ${result.phoneCount} phone(s), ${result.stageHistoryCount} stage history item(s), period: ${db.report_context.from}..${db.report_context.to}.`);
+  if (reportSource === 'bitrix' && !args['skip-bitrix']) {
+    const result = await fetchBitrixLeadsCreatedRange(db, syncFrom, syncTo);
+    console.log(`Bitrix range synced: ${result.leadCount} lead(s), ${result.phoneCount} phone(s), ${result.stageHistoryCount} stage history item(s), period: ${syncFrom}..${syncTo}.`);
   }
 
-  if (!args['skip-bitrix'] && db.report_context.source !== 'bitrix') {
+  if (!args['skip-bitrix'] && reportSource !== 'bitrix') {
     const phones = activeUpload ? uploadPhones(db, activeUpload.upload_id) : Object.keys(db.phones);
     const result = await syncBitrixForPhones(db, phones);
     console.log(`Bitrix synced: ${result.leadCount} lead(s).`);
@@ -2347,12 +2565,12 @@ async function run() {
 
   if (!args['skip-skorozvon']) {
     const dates = args['calls-today']
-      ? [todayIsoDate()]
+      ? [today]
       : args['calls-date']
         ? [String(args['calls-date'])]
-        : args['calls-from'] || db.report_context.from
-      ? dateRange(String(args['calls-from'] || db.report_context.from), String(args['calls-to'] || db.report_context.to || args['calls-from'] || db.report_context.from))
-      : [todayIsoDate()];
+        : args['calls-from'] || args['month-current'] || args.from || args.to
+      ? dateRange(String(args['calls-from'] || syncFrom), String(args['calls-to'] || syncTo || args['calls-from'] || syncFrom))
+      : [today];
     let totalCalls = 0;
 
     for (const date of dates) {
@@ -2366,6 +2584,15 @@ async function run() {
       console.log(`Skorozvon range synced: ${totalCalls} call(s), ${dates[0]}..${dates.at(-1)}.`);
     }
   }
+
+  const historyRange = historyReportRange(db, syncFrom, syncTo);
+  db.report_context = {
+    source: reportSource,
+    from: explicitReportFrom || historyRange.from,
+    to: explicitReportTo || historyRange.to,
+    sync_from: syncFrom,
+    sync_to: syncTo,
+  };
 
   await saveJson(dbPath, db);
   const reportStats = await generateReports(db, reportsDir);
