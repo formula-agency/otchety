@@ -6,7 +6,7 @@ import path from 'node:path';
 
 const DEFAULT_DB_PATH = 'data/reporting-db.json';
 const DEFAULT_REPORTS_DIR = 'reports';
-const DEFAULT_REPORT_HISTORY_FROM = '2026-04-01';
+const DEFAULT_REPORT_HISTORY_FROM = '2026-05-01';
 const BITRIX_BATCH_SIZE = 50;
 const SKOROZVON_PAGE_SIZE = 500;
 const SKOROZVON_REQUEST_DELAY_MS = 250;
@@ -1661,7 +1661,6 @@ function buildIndicatorDetailRows(baseRows) {
 
 function buildIndicatorsValues(baseRows) {
   const sortedBaseRows = [...baseRows].sort((a, b) => `${a.upload_date}_${a.upload_id}_${roundSortValue(a.round_number)}`.localeCompare(`${b.upload_date}_${b.upload_id}_${roundSortValue(b.round_number)}`));
-  const summaryRows = buildSourceSummaryRows(sortedBaseRows);
   const detailLayout = buildIndicatorDetailRows(sortedBaseRows);
   const values = [
     [
@@ -1680,13 +1679,6 @@ function buildIndicatorsValues(baseRows) {
       'Проиграно',
       'Сконвертировано',
       'CR',
-      '',
-      'Итог по источникам',
-      '',
-      '',
-      '',
-      '',
-      '',
     ],
     [
       '',
@@ -1703,36 +1695,17 @@ function buildIndicatorsValues(baseRows) {
       '',
       '',
       '',
-      '',
-      '',
-      'Период',
-      'Источник',
-      'Сегмент',
-      'Суммарный объем загрузки',
-      'Сконвертировано лидов',
-      'CR',
     ],
   ];
 
-  const maxRows = Math.max(detailLayout.rows.length, summaryRows.length);
-  for (let index = 0; index < maxRows; index += 1) {
+  for (let index = 0; index < detailLayout.rows.length; index += 1) {
     const base = detailLayout.rows[index];
-    const summary = summaryRows[index];
-    const row = Array.from({ length: 22 }, () => '');
+    const row = Array.from({ length: 15 }, () => '');
 
     if (base) {
       for (let columnIndex = 0; columnIndex <= 14; columnIndex += 1) {
         row[columnIndex] = base[columnIndex] ?? '';
       }
-    }
-
-    if (summary) {
-      row[16] = summary.period;
-      row[17] = summary.source;
-      row[18] = summary.segment;
-      row[19] = summary.uploadVolume;
-      row[20] = summary.converted;
-      row[21] = summary.cr;
     }
 
     values.push(row);
@@ -1744,6 +1717,22 @@ function buildIndicatorsValues(baseRows) {
     rowStyles: detailLayout.rowStyles,
     merges: detailLayout.merges,
   };
+}
+
+function buildSourceSummaryValues(baseRows) {
+  const rows = buildSourceSummaryRows(baseRows);
+  return [
+    ['Итог по источникам'],
+    ['Период', 'Источник', 'Сегмент', 'Суммарный объем загрузки', 'Сконвертировано лидов', 'CR'],
+    ...rows.map((row) => [
+      row.period,
+      row.source,
+      row.segment,
+      row.uploadVolume,
+      row.converted,
+      row.cr,
+    ]),
+  ];
 }
 
 function buildReadableCallabilityRows(byBaseRows) {
@@ -1843,6 +1832,7 @@ function buildGoogleWorksheets(db) {
   const byBaseRows = buildCallabilityByBaseRows(db);
   const detailRows = buildUploadItemsRows(db);
   const indicatorsSheet = buildIndicatorsValues(baseRows);
+  const sourceSummaryValues = buildSourceSummaryValues(baseRows);
   const baseColumns = baseSheetColumns();
   const dailyColumns = callabilitySheetColumns('Дата');
   const byBaseColumns = callabilitySheetColumns('first_upload_id');
@@ -1862,7 +1852,6 @@ function buildGoogleWorksheets(db) {
         { startIndex: 6, endIndex: 7, pixelSize: 140 },
         { startIndex: 7, endIndex: 8, pixelSize: 115 },
         { startIndex: 8, endIndex: 15, pixelSize: 120 },
-        { startIndex: 16, endIndex: 22, pixelSize: 135 },
       ],
       merges: [
         { startRow: 0, endRow: 2, startColumn: 0, endColumn: 1 },
@@ -1876,7 +1865,6 @@ function buildGoogleWorksheets(db) {
         { startRow: 0, endRow: 2, startColumn: 12, endColumn: 13 },
         { startRow: 0, endRow: 2, startColumn: 13, endColumn: 14 },
         { startRow: 0, endRow: 2, startColumn: 14, endColumn: 15 },
-        { startRow: 0, endRow: 1, startColumn: 16, endColumn: 22 },
         ...(indicatorsSheet.merges ?? []),
       ],
       columnFormats: [
@@ -1888,9 +1876,25 @@ function buildGoogleWorksheets(db) {
         { index: 12, format: 'integer', startRowIndex: 2 },
         { index: 13, format: 'integer', startRowIndex: 2 },
         { index: 14, format: 'percent', startRowIndex: 2 },
-        { index: 19, format: 'integer', startRowIndex: 2 },
-        { index: 20, format: 'integer', startRowIndex: 2 },
-        { index: 21, format: 'percent', startRowIndex: 2 },
+      ],
+    },
+    {
+      title: 'Итог по источникам',
+      values: sourceSummaryValues,
+      frozenRows: 2,
+      headerRows: [0, 1],
+      columnWidths: [
+        { startIndex: 0, endIndex: 3, pixelSize: 160 },
+        { startIndex: 3, endIndex: 5, pixelSize: 140 },
+        { startIndex: 5, endIndex: 6, pixelSize: 110 },
+      ],
+      merges: [
+        { startRow: 0, endRow: 1, startColumn: 0, endColumn: 6 },
+      ],
+      columnFormats: [
+        { index: 3, format: 'integer', startRowIndex: 2 },
+        { index: 4, format: 'integer', startRowIndex: 2 },
+        { index: 5, format: 'percent', startRowIndex: 2 },
       ],
     },
     {
@@ -2298,9 +2302,9 @@ function formatRequestsForWorksheet(sheet, worksheet, desiredIndex) {
         range: {
           sheetId,
           startRowIndex: 0,
-          endRowIndex: rowCount,
+          endRowIndex: Math.max(100, rowCount + 10),
           startColumnIndex: 0,
-          endColumnIndex: columnCount,
+          endColumnIndex: Math.max(26, columnCount),
         },
       },
     });
