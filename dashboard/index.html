@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Отчет по базам</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script defer src="./data/report-data.js"></script>
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="Наверх">
+      <span class="brand__main">Отчет по базам</span>
+    </a>
+    <nav class="site-nav" aria-label="Разделы">
+      <a href="#overview">Обзор</a>
+      <a href="#sources">Источники</a>
+      <a href="#details">Детализация</a>
+    </nav>
+    <div class="header-actions">
+      <a class="button button--ghost" href="https://docs.google.com/spreadsheets/d/1rbkVQNWdBS62V301A5p6ZEycNJXkDMAT89EWinJs1ZQ/edit?gid=400365316#gid=400365316" target="_blank" rel="noreferrer">К таблице</a>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="overview-strip section-anchor" id="overview" aria-labelledby="overview-title">
+      <div class="overview-strip__grid" aria-hidden="true"></div>
+      <div class="overview-strip__header">
+        <p class="eyebrow">Внутренний отчет</p>
+        <h1 id="overview-title">Отчет по базам</h1>
+        <p class="overview-strip__lead">Срез по загрузкам, кругам, статусам и итогам по источникам.</p>
+      </div>
+
+      <div class="overview-summary-row" aria-label="Краткая сводка">
+        <article class="overview-stat">
+          <span>Источников</span>
+          <strong id="hero-sources">0</strong>
+        </article>
+        <article class="overview-stat">
+          <span>Баз</span>
+          <strong id="hero-segments">0</strong>
+        </article>
+        <article class="overview-stat">
+          <span>Срезов</span>
+          <strong id="hero-rows">0</strong>
+        </article>
+        <article class="overview-stat">
+          <span>Объем</span>
+          <strong id="hero-volume">0</strong>
+        </article>
+        <article class="overview-stat">
+          <span>В процессе</span>
+          <strong id="hero-working">0</strong>
+        </article>
+        <article class="overview-stat">
+          <span>В доработке</span>
+          <strong id="hero-revision">0</strong>
+        </article>
+        <article class="overview-stat">
+          <span>Проиграно</span>
+          <strong id="hero-lost">0</strong>
+        </article>
+        <article class="overview-stat">
+          <span>CR</span>
+          <strong id="hero-cr">0%</strong>
+        </article>
+      </div>
+    </section>
+
+    <div class="page-shell">
+    <section class="filters-band" aria-label="Фильтры">
+      <label class="field">
+        <span>Источник</span>
+        <select id="filter-source"></select>
+      </label>
+      <label class="field">
+        <span>База</span>
+        <select id="filter-segment"></select>
+      </label>
+      <label class="field">
+        <span>Круг</span>
+        <select id="filter-round"></select>
+      </label>
+      <label class="field">
+        <span>От</span>
+        <input id="filter-date-from" type="date">
+      </label>
+      <label class="field">
+        <span>До</span>
+        <input id="filter-date-to" type="date">
+      </label>
+      <label class="field field-search">
+        <span>Поиск</span>
+        <input id="filter-search" type="search" placeholder="utm campaign, utm content">
+      </label>
+      <button id="reset-filters" class="ghost-button" type="button">Сбросить</button>
+    </section>
+
+    <section class="active-state" aria-live="polite">
+      <div id="active-filters" class="chips"></div>
+      <div id="selection-summary" class="selection-summary"></div>
+    </section>
+
+    <section class="kpi-grid" aria-label="Ключевые показатели">
+      <article class="kpi-card accent-cyan">
+        <span class="kpi-label">Объем загрузки</span>
+        <strong id="kpi-volume" class="kpi-value">0</strong>
+      </article>
+      <article class="kpi-card accent-emerald">
+        <span class="kpi-label">В процессе</span>
+        <strong id="kpi-working" class="kpi-value">0</strong>
+      </article>
+      <article class="kpi-card accent-amber">
+        <span class="kpi-label">В доработке</span>
+        <strong id="kpi-revision" class="kpi-value">0</strong>
+      </article>
+      <article class="kpi-card accent-coral">
+        <span class="kpi-label">Проиграно</span>
+        <strong id="kpi-lost" class="kpi-value">0</strong>
+      </article>
+      <article class="kpi-card accent-lime">
+        <span class="kpi-label">Сконвертировано</span>
+        <strong id="kpi-converted" class="kpi-value">0</strong>
+      </article>
+      <article class="kpi-card accent-violet">
+        <span class="kpi-label">CR</span>
+        <strong id="kpi-cr" class="kpi-value">0%</strong>
+      </article>
+    </section>
+
+    <section class="chart-grid chart-grid--primary">
+      <article class="panel panel-wide">
+        <div class="panel-head">
+          <h2>Динамика по дням</h2>
+          <p>Объем и конверсия</p>
+        </div>
+        <div class="chart-frame chart-frame--daily">
+          <canvas id="daily-chart" height="120"></canvas>
+        </div>
+      </article>
+
+    </section>
+
+    <section class="table-grid">
+      <article class="panel">
+        <div class="panel-head panel-head-inline">
+          <div>
+            <h2>Итог по источникам</h2>
+            <p>Период, источник, база</p>
+          </div>
+        </div>
+        <div class="table-wrap" id="sources">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Период</th>
+                <th>Источник</th>
+                <th>База</th>
+                <th>Объем</th>
+                <th>Сконвертировано</th>
+                <th>CR</th>
+              </tr>
+            </thead>
+            <tbody id="source-summary-body"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head panel-head-inline">
+          <div>
+            <h2>Детализация</h2>
+            <p id="detail-caption">Срез по дате, базе и кругу</p>
+          </div>
+          <div class="detail-actions">
+            <label class="inline-control">
+              <span>Дата</span>
+              <select id="detail-date-select"></select>
+            </label>
+            <button id="export-csv" class="ghost-button" type="button">Экспорт CSV</button>
+          </div>
+        </div>
+        <div class="table-wrap table-wrap--details" id="details">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Источник</th>
+                <th>Кампания</th>
+                <th>База</th>
+                <th>Круг</th>
+                <th>Объем</th>
+                <th>В процессе</th>
+                <th>В доработке</th>
+                <th>Проиграно</th>
+                <th>Сконвертировано</th>
+                <th>CR</th>
+              </tr>
+            </thead>
+            <tbody id="detail-body"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="chart-grid chart-grid--secondary">
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Источники</h2>
+          <p>Доля объема</p>
+        </div>
+        <div class="chart-frame chart-frame--source">
+          <canvas id="source-chart" height="240"></canvas>
+        </div>
+      </article>
+
+      <article class="panel panel-wide">
+        <div class="panel-head">
+          <h2>Базы</h2>
+          <p>Структура статусов</p>
+        </div>
+        <div class="chart-frame chart-frame--segment">
+          <canvas id="segment-chart" height="140"></canvas>
+        </div>
+      </article>
+    </section>
+    </div>
+  </main>
+</body>
+</html>

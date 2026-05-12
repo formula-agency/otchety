@@ -6,6 +6,7 @@ import path from 'node:path';
 
 const DEFAULT_DB_PATH = 'data/reporting-db.json';
 const DEFAULT_REPORTS_DIR = 'reports';
+const DEFAULT_DASHBOARD_DIR = 'dashboard';
 const DEFAULT_REPORT_HISTORY_FROM = '2026-05-01';
 const BITRIX_BATCH_SIZE = 50;
 const SKOROZVON_PAGE_SIZE = 500;
@@ -27,6 +28,10 @@ const BASE_LABELS = [
   { label: 'Реанимация сделки', tokens: ['deal-reanimation', 'deal_reanimation', 'reanimation_deal', 'reanimation_formula'] },
   { label: 'Реанимация', tokens: ['reanimation', 'reanim'] },
   { label: 'Карты', tokens: ['maps', 'map'] },
+];
+const SOURCE_LABELS = [
+  { label: 'Media Take', tokens: ['d2'] },
+  { label: 'Реанимация', tokens: ['rean'] },
 ];
 const REVISION_STATUS_NAMES = [
   'Перезвонить 30 дн',
@@ -163,6 +168,17 @@ function baseLabel(value) {
 
   const normalized = raw.toLowerCase().replace(/[\s-]+/g, '_');
   const match = BASE_LABELS.find((item) => item.tokens.some((token) => normalized.includes(token.toLowerCase().replace(/[\s-]+/g, '_'))));
+  return match?.label || raw;
+}
+
+function sourceLabel(utmMedium, utmSource = '') {
+  const rawMedium = String(utmMedium ?? '').trim();
+  const rawSource = String(utmSource ?? '').trim();
+  const raw = rawMedium || rawSource;
+  if (!raw) return 'Без источника';
+
+  const normalized = raw.toLowerCase().replace(/[\s-]+/g, '_');
+  const match = SOURCE_LABELS.find((item) => item.tokens.some((token) => normalized === token.toLowerCase().replace(/[\s-]+/g, '_')));
   return match?.label || raw;
 }
 
@@ -1513,16 +1529,17 @@ function buildSourceSummaryRows(baseRows) {
 
   for (const row of baseRows.filter((item) => item.source_type !== 'bitrix_only')) {
     const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium);
+    const source = sourceLabel(row.utm_medium, row.utm_source);
     const key = stableJson({
       period: russianMonth(row.upload_date),
-      source: row.utm_source || row.utm_medium || 'Без источника',
+      source,
       segment: segmentLabel,
     });
 
     if (!groups.has(key)) {
       groups.set(key, {
         period: russianMonth(row.upload_date),
-        source: row.utm_source || row.utm_medium || 'Без источника',
+        source,
         segment: segmentLabel,
         uploadVolume: 0,
         converted: 0,
@@ -1824,6 +1841,109 @@ function buildReadableCallabilityValues(db) {
   }
 
   return values;
+}
+
+function buildDashboardDailyRows(baseRows) {
+  const groups = new Map();
+
+  for (const row of baseRows) {
+    const key = row.upload_date;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, rows]) => {
+      const totals = summarizeBaseRows(rows);
+      return {
+        date,
+        month: monthKey(date),
+        uploadVolume: totals.uploadVolume,
+        working: totals.working,
+        revision: totals.revision,
+        lost: totals.lost,
+        converted: totals.converted,
+        cr: totals.cr,
+      };
+    });
+}
+
+function buildDashboardPayload(db, baseRows) {
+  const totals = summarizeBaseRows(baseRows);
+  const sourceSummaryRows = buildSourceSummaryRows(baseRows);
+  const dailyRows = buildDashboardDailyRows(baseRows);
+  const ranges = {
+    from: reportContext(db).from || '',
+    to: reportContext(db).to || '',
+  };
+  const normalizedBaseRows = [...baseRows]
+    .sort((a, b) => `${b.upload_date}_${roundSortValue(b.round_number)}_${b.utm_content}`.localeCompare(`${a.upload_date}_${roundSortValue(a.round_number)}_${a.utm_content}`))
+    .map((row) => ({
+      uploadDate: row.upload_date,
+      month: monthKey(row.upload_date),
+      monthLabel: monthTitle(row.upload_date),
+      utmMedium: row.utm_medium || '',
+      utmSource: row.utm_source || '',
+      sourceLabel: sourceLabel(row.utm_medium, row.utm_source),
+      utmCampaign: row.utm_campaign || '',
+      utmContent: row.utm_content || '',
+      utmTerm: row.utm_term || '',
+      baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium),
+      roundNumber: Number(row.round_number || 0),
+      uploadVolume: Number(uploadVolume(row) || 0),
+      working: Number(row.working_phone_count || 0),
+      revision: Number(row.revision_lead_count || 0),
+      lost: Number(row.lost_phone_count || 0),
+      converted: Number(row.converted_lead_count || 0),
+      cr: percentValue(row.cr_by_lead) || 0,
+    }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    report: {
+      source: reportContext(db).source || 'bitrix',
+      from: ranges.from,
+      to: ranges.to,
+    },
+    totals: {
+      uploadVolume: totals.uploadVolume,
+      working: totals.working,
+      revision: totals.revision,
+      lost: totals.lost,
+      converted: totals.converted,
+      cr: totals.cr || 0,
+      rows: normalizedBaseRows.length,
+      sources: [...new Set(normalizedBaseRows.map((row) => row.sourceLabel).filter(Boolean))].length,
+      segments: [...new Set(normalizedBaseRows.map((row) => row.baseLabel).filter(Boolean))].length,
+    },
+    filters: {
+      months: [...new Set(normalizedBaseRows.map((row) => row.month))].sort(),
+      sources: [...new Set(normalizedBaseRows.map((row) => row.sourceLabel).filter(Boolean))].sort(),
+      segments: [...new Set(normalizedBaseRows.map((row) => row.baseLabel).filter(Boolean))].sort(),
+      rounds: [...new Set(normalizedBaseRows.map((row) => row.roundNumber).filter((value) => Number.isFinite(value) && value > 0))].sort((a, b) => a - b),
+      minDate: dailyRows[0]?.date || ranges.from,
+      maxDate: dailyRows.at(-1)?.date || ranges.to,
+    },
+    dailyRows,
+    sourceSummaryRows: sourceSummaryRows.map((row) => ({
+      period: row.period,
+      source: row.source,
+      segment: row.segment,
+      uploadVolume: Number(row.uploadVolume || 0),
+      converted: Number(row.converted || 0),
+      cr: row.cr || 0,
+    })),
+    baseRows: normalizedBaseRows,
+  };
+}
+
+async function writeDashboardFiles(db, baseRows, dashboardDir) {
+  const payload = buildDashboardPayload(db, baseRows);
+  const dataDir = path.join(dashboardDir, 'data');
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(path.join(dataDir, 'report-data.json'), `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  await writeFile(path.join(dataDir, 'report-data.js'), `window.REPORT_DASHBOARD_DATA = ${JSON.stringify(payload)};\n`, 'utf8');
 }
 
 function buildGoogleWorksheets(db) {
@@ -2455,7 +2575,7 @@ async function syncGoogleSheets(db) {
   };
 }
 
-async function generateReports(db, reportsDir) {
+async function generateReports(db, reportsDir, dashboardDir = DEFAULT_DASHBOARD_DIR) {
   const baseRows = buildBaseReportRows(db);
   await writeCsv(path.join(reportsDir, 'base_report.csv'), baseRows, [
     { header: 'Дата загрузки', value: (row) => row.upload_date },
@@ -2519,6 +2639,8 @@ async function generateReports(db, reportsDir) {
     { header: 'Сконвертирован', value: (row) => row.converted },
   ]);
 
+  await writeDashboardFiles(db, baseRows, dashboardDir);
+
   return {
     baseRows: baseRows.length,
     dailyRows: dailyRows.length,
@@ -2538,6 +2660,7 @@ async function run() {
 
   const dbPath = String(args.db || DEFAULT_DB_PATH);
   const reportsDir = String(args.out || DEFAULT_REPORTS_DIR);
+  const dashboardDir = String(args.dashboard || DEFAULT_DASHBOARD_DIR);
   const db = await loadJson(dbPath, createEmptyDb());
   db.bitrix_stage_history ??= {};
   const today = todayIsoDate();
@@ -2611,7 +2734,7 @@ async function run() {
   };
 
   await saveJson(dbPath, db);
-  const reportStats = await generateReports(db, reportsDir);
+  const reportStats = await generateReports(db, reportsDir, dashboardDir);
   console.log(`Reports generated: ${JSON.stringify(reportStats)}.`);
 
   if (args['google-sheets']) {
