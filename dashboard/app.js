@@ -17,7 +17,6 @@ const els = {
   updatedAt: document.getElementById('updated-at'),
   heroSources: document.getElementById('hero-sources'),
   heroSegments: document.getElementById('hero-segments'),
-  heroRows: document.getElementById('hero-rows'),
   heroVolume: document.getElementById('hero-volume'),
   heroCr: document.getElementById('hero-cr'),
   heroWorking: document.getElementById('hero-working'),
@@ -62,6 +61,7 @@ const monthFormatter = new Intl.DateTimeFormat('ru-RU', { month: 'long', year: '
 
 let dailyChart;
 let sourceChart;
+let roundChart;
 let segmentChart;
 
 function formatNumber(value) {
@@ -217,6 +217,28 @@ function summarizeBySegment(rows) {
     .sort((a, b) => b.uploadVolume - a.uploadVolume);
 }
 
+function summarizeByRound(rows) {
+  const groups = new Map();
+
+  for (const row of rows) {
+    const key = Number(row.roundNumber || 0);
+    if (!Number.isFinite(key) || key <= 0) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  return [...groups.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([round, items]) => {
+      const summary = summarizeRows(items);
+      return {
+        round,
+        ...summary,
+        cr: summary.uploadVolume > 0 ? summary.converted / summary.uploadVolume : 0,
+      };
+    });
+}
+
 function summarizeSourceTable(rows) {
   const groups = new Map();
 
@@ -268,7 +290,6 @@ function renderHero(rows) {
   setText(els.reportPeriod, rangeLabel);
   setText(els.heroSources, formatNumber(uniqueSources));
   setText(els.heroSegments, formatNumber(uniqueSegments));
-  setText(els.heroRows, formatNumber(rows.length));
   setText(els.heroVolume, formatNumber(summary.uploadVolume));
   setText(els.heroCr, formatPercent(summary.uploadVolume > 0 ? summary.converted / summary.uploadVolume : 0));
   setText(els.heroWorking, formatNumber(summary.working));
@@ -383,7 +404,7 @@ function renderSourceSummaryTable(rows) {
 
 function renderDetailTable(rows) {
   if (rows.length === 0) {
-    els.detailBody.innerHTML = '<tr class="empty-row"><td colspan="11">Нет данных</td></tr>';
+    els.detailBody.innerHTML = '<tr class="empty-row"><td colspan="10">Нет данных</td></tr>';
     return;
   }
 
@@ -392,7 +413,6 @@ function renderDetailTable(rows) {
       <tr>
         <td>${formatDate(row.uploadDate)}</td>
         <td>${row.sourceLabel || '—'}</td>
-        <td>${row.utmCampaign || '—'}</td>
         <td>${row.baseLabel || '—'}</td>
         <td>${formatNumber(row.roundNumber)}</td>
         <td>${formatNumber(row.uploadVolume)}</td>
@@ -454,6 +474,41 @@ function ensureCharts() {
             callbacks: {
               label(context) {
                 return `${context.label}: ${formatNumber(context.parsed)}`;
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  if (!roundChart) {
+    roundChart = new Chart(document.getElementById('round-chart'), {
+      type: 'bar',
+      data: { labels: [], datasets: [] },
+      options: {
+        maintainAspectRatio: false,
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { grid: { display: false } },
+          y: { beginAtZero: true, ticks: { callback: (value) => formatNumber(value) } },
+          y1: {
+            beginAtZero: true,
+            position: 'right',
+            grid: { drawOnChartArea: false },
+            ticks: { callback: (value) => `${Math.round(value * 100)}%` },
+          },
+        },
+        plugins: {
+          legend: { position: 'bottom' },
+          tooltip: {
+            callbacks: {
+              label(context) {
+                const value = context.parsed.y;
+                return context.dataset.yAxisID === 'y1'
+                  ? `${context.dataset.label}: ${formatPercent(value)}`
+                  : `${context.dataset.label}: ${formatNumber(value)}`;
               },
             },
           },
@@ -534,6 +589,32 @@ function renderCharts(rows) {
   }];
   sourceChart.update();
 
+  const roundRows = summarizeByRound(rows);
+  roundChart.data.labels = roundRows.map((row) => `Круг ${row.round}`);
+  roundChart.data.datasets = [
+    {
+      type: 'bar',
+      label: 'Объем',
+      data: roundRows.map((row) => row.uploadVolume),
+      backgroundColor: `${chartPalette.emerald}B3`,
+      borderColor: chartPalette.emerald,
+      borderWidth: 1,
+      borderRadius: 4,
+      yAxisID: 'y',
+    },
+    {
+      type: 'line',
+      label: 'CR',
+      data: roundRows.map((row) => row.cr),
+      borderColor: chartPalette.coral,
+      backgroundColor: chartPalette.coral,
+      tension: 0.25,
+      pointRadius: 3,
+      yAxisID: 'y1',
+    },
+  ];
+  roundChart.update();
+
   const segmentRows = summarizeBySegment(rows).slice(0, 8).reverse();
   segmentChart.data.labels = segmentRows.map((row) => row.segment);
   segmentChart.data.datasets = [
@@ -566,11 +647,10 @@ function renderCharts(rows) {
 }
 
 function exportCsv(rows) {
-  const header = ['Дата', 'Источник', 'Кампания', 'База', 'Круг', 'Объем', 'В процессе', 'В доработке', 'Проиграно', 'Сконвертировано', 'CR'];
+  const header = ['Дата', 'Источник', 'База', 'Круг', 'Объем', 'В процессе', 'В доработке', 'Проиграно', 'Сконвертировано', 'CR'];
   const body = rows.map((row) => [
     row.uploadDate,
     row.sourceLabel,
-    row.utmCampaign,
     row.baseLabel,
     row.roundNumber,
     row.uploadVolume,
