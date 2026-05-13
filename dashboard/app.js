@@ -4,8 +4,8 @@ const state = {
   source: 'all',
   segment: 'all',
   round: 'all',
-  dateFrom: data?.filters?.minDate || '',
-  dateTo: data?.filters?.maxDate || '',
+  dateFrom: '',
+  dateTo: '',
   detailDate: 'latest',
   search: '',
 };
@@ -81,6 +81,28 @@ function formatMonth(value) {
   if (!value) return '—';
   const label = monthFormatter.format(new Date(`${value}-01T00:00:00`));
   return label.slice(0, 1).toUpperCase() + label.slice(1);
+}
+
+function clampDate(value, minValue, maxValue) {
+  if (!value) return '';
+  if (minValue && value < minValue) return minValue;
+  if (maxValue && value > maxValue) return maxValue;
+  return value;
+}
+
+function resolveDefaultDateRange(filters = {}) {
+  const minDate = filters.minDate || '';
+  const maxDate = filters.maxDate || '';
+  if (!maxDate) {
+    return { dateFrom: minDate, dateTo: maxDate };
+  }
+
+  const anchor = new Date(`${maxDate}T00:00:00`);
+  const monthStart = new Date(anchor.getFullYear(), anchor.getMonth(), 1).toISOString().slice(0, 10);
+  return {
+    dateFrom: clampDate(monthStart, minDate, maxDate),
+    dateTo: maxDate,
+  };
 }
 
 function csvEscape(value) {
@@ -739,11 +761,12 @@ function bindControls() {
     render();
   });
   els.reset.addEventListener('click', () => {
+    const defaultRange = resolveDefaultDateRange(data.filters);
     state.source = 'all';
     state.segment = 'all';
     state.round = 'all';
-    state.dateFrom = data.filters.minDate || '';
-    state.dateTo = data.filters.maxDate || '';
+    state.dateFrom = defaultRange.dateFrom;
+    state.dateTo = defaultRange.dateTo;
     state.detailDate = 'latest';
     state.search = '';
 
@@ -764,6 +787,10 @@ function init() {
     document.body.innerHTML = '<main class="page-shell"><section class="panel"><div class="panel-head"><h2>Нет данных</h2></div></section></main>';
     return;
   }
+
+  const defaultRange = resolveDefaultDateRange(data.filters);
+  state.dateFrom = defaultRange.dateFrom;
+  state.dateTo = defaultRange.dateTo;
 
   setText(els.reportPeriod, buildDateRangeLabel(data.report.from, data.report.to));
   setText(els.updatedAt, new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(data.generatedAt)));
