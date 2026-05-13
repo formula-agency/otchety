@@ -142,6 +142,33 @@ select {
   gap: 12px;
 }
 
+.report-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(22, 20, 20, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.report-switch__item {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  color: rgba(22, 20, 20, 0.7);
+  font-size: 14px;
+  transition: color 180ms ease, background 180ms ease;
+}
+
+.report-switch__item:hover,
+.report-switch__item.is-active {
+  color: var(--ink);
+  background: rgba(102, 172, 255, 0.12);
+}
+
 .header-pill {
   display: inline-flex;
   align-items: center;
