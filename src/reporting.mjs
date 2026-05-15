@@ -18,6 +18,13 @@ const BITRIX_FIRST_UTM_FIELDS = {
   content: 'UF_LEAD_FIRST_UTM_CONTENT',
   term: 'UF_LEAD_FIRST_UTM_TERM',
 };
+const BITRIX_FIRST_DEAL_UTM_FIELDS = {
+  medium: 'UF_DEAL_FIRST_UTM_MEDIUM',
+  source: 'UF_DEAL_FIRST_UTM_SOURCE',
+  campaign: 'UF_DEAL_FIRST_UTM_CAMPAIGN',
+  content: 'UF_DEAL_FIRST_UTM_CONTENT',
+  term: 'UF_DEAL_FIRST_UTM_TERM',
+};
 const BASE_LABELS = [
   { label: 'Сайты стандартные', tokens: ['site-standard', 'site_standard'] },
   { label: 'Сайты расширенные', tokens: ['site-expanded', 'site_expanded'] },
@@ -363,6 +370,7 @@ function createEmptyDb() {
     upload_items: [],
     phones: {},
     bitrix_leads: {},
+    bitrix_deals: {},
     bitrix_statuses: {},
     bitrix_stage_history: {},
     skorozvon_calls: {},
@@ -720,6 +728,34 @@ function normalizeBitrixLead(lead) {
   };
 }
 
+function dealCreatedDate(deal) {
+  return String(deal?.date_create || deal?.DATE_CREATE || '').slice(0, 10);
+}
+
+function normalizeBitrixDeal(deal) {
+  return {
+    id: String(deal.ID),
+    lead_id: String(deal.LEAD_ID || ''),
+    stage_id: deal.STAGE_ID || '',
+    date_create: deal.DATE_CREATE || '',
+    utm_medium: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.medium] || deal.UTM_MEDIUM || '',
+    utm_source: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.source] || deal.UTM_SOURCE || '',
+    utm_campaign: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.campaign] || deal.UTM_CAMPAIGN || '',
+    utm_content: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.content] || deal.UTM_CONTENT || '',
+    utm_term: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.term] || deal.UTM_TERM || '',
+    bitrix_utm_medium: deal.UTM_MEDIUM || '',
+    bitrix_utm_source: deal.UTM_SOURCE || '',
+    bitrix_utm_campaign: deal.UTM_CAMPAIGN || '',
+    bitrix_utm_content: deal.UTM_CONTENT || '',
+    bitrix_utm_term: deal.UTM_TERM || '',
+    first_utm_medium: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.medium] || '',
+    first_utm_source: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.source] || '',
+    first_utm_campaign: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.campaign] || '',
+    first_utm_content: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.content] || '',
+    first_utm_term: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.term] || '',
+  };
+}
+
 function updatePhoneRegistryFromLead(db, lead) {
   for (const phone of leadPhones(lead)) {
     if (!phone) continue;
@@ -883,6 +919,27 @@ function bitrixLeadSelectParams() {
   return Object.fromEntries(fields.map((field, index) => [`select[${index}]`, field]));
 }
 
+function bitrixDealSelectParams() {
+  const fields = [
+    'ID',
+    'LEAD_ID',
+    'STAGE_ID',
+    'DATE_CREATE',
+    'UTM_MEDIUM',
+    'UTM_SOURCE',
+    'UTM_CAMPAIGN',
+    'UTM_CONTENT',
+    'UTM_TERM',
+    BITRIX_FIRST_DEAL_UTM_FIELDS.medium,
+    BITRIX_FIRST_DEAL_UTM_FIELDS.source,
+    BITRIX_FIRST_DEAL_UTM_FIELDS.campaign,
+    BITRIX_FIRST_DEAL_UTM_FIELDS.content,
+    BITRIX_FIRST_DEAL_UTM_FIELDS.term,
+  ];
+
+  return Object.fromEntries(fields.map((field, index) => [`select[${index}]`, field]));
+}
+
 async function fetchBitrixLeadsCreatedRange(db, fromIso, toIso) {
   const webhookUrl = getBitrixWebhookUrl();
   await syncBitrixStatuses(db, webhookUrl);
@@ -919,6 +976,35 @@ async function fetchBitrixLeadsCreatedRange(db, fromIso, toIso) {
     phoneCount: phones.length,
     duplicateLeadCount: duplicates.leadCount,
     stageHistoryCount: stageHistory.historyCount,
+  };
+}
+
+async function fetchBitrixDealsCreatedRange(db, fromIso, toIso) {
+  const webhookUrl = getBitrixWebhookUrl();
+  let start = 0;
+  const deals = [];
+
+  do {
+    const params = {
+      ...bitrixDealSelectParams(),
+      'order[DATE_CREATE]': 'ASC',
+      'filter[>=DATE_CREATE]': `${fromIso}T00:00:00+05:00`,
+      'filter[<DATE_CREATE]': `${addDays(toIso, 1)}T00:00:00+05:00`,
+      start: String(start),
+    };
+    const data = await bitrixCall(webhookUrl, 'crm.deal.list', params);
+    const pageDeals = (data.result ?? []).map(normalizeBitrixDeal);
+
+    for (const deal of pageDeals) {
+      db.bitrix_deals[deal.id] = deal;
+    }
+
+    deals.push(...pageDeals);
+    start = data.next ?? null;
+  } while (start !== null && start !== undefined);
+
+  return {
+    dealCount: deals.length,
   };
 }
 
@@ -1094,6 +1180,11 @@ function historyReportRange(db, fallbackFrom = todayIsoDate(), fallbackTo = fall
     if (uploadDate) dates.push(uploadDate);
   }
 
+  for (const deal of Object.values(db.bitrix_deals ?? {})) {
+    const createdDate = dealCreatedDate(deal);
+    if (createdDate) dates.push(createdDate);
+  }
+
   for (const call of Object.values(db.skorozvon_calls ?? {})) {
     if (call?.date) dates.push(call.date);
   }
@@ -1195,6 +1286,18 @@ function leadRoundNumber(db, lead) {
 
 function buildBitrixBaseReportRows(db) {
   const groups = new Map();
+  const visibleLeadGroupKeyByLeadId = new Map();
+  const visibleGroupKeysBySignature = new Map();
+
+  function groupSignature(utmMedium, utmSource, utmCampaign, utmContent, roundNumber) {
+    return stableJson({
+      utm_medium: utmMedium || '',
+      utm_source: utmSource || '',
+      utm_campaign: utmCampaign || '',
+      utm_content: utmContent || '',
+      round_number: String(roundNumber || ''),
+    });
+  }
 
   for (const lead of Object.values(db.bitrix_leads)) {
     const uploadDate = leadUploadDate(lead);
@@ -1224,10 +1327,71 @@ function buildBitrixBaseReportRows(db) {
         utm_content: lead.utm_content,
         utm_term: lead.utm_term,
         leads: [],
+        converted_deals: [],
       });
     }
 
     groups.get(key).leads.push(lead);
+    visibleLeadGroupKeyByLeadId.set(String(lead.id), key);
+    const signature = groupSignature(lead.utm_medium, lead.utm_source, lead.utm_campaign, lead.utm_content, roundNumber);
+    if (!visibleGroupKeysBySignature.has(signature)) visibleGroupKeysBySignature.set(signature, []);
+    visibleGroupKeysBySignature.get(signature).push(key);
+  }
+
+  const visibleGroupKeys = [...groups.keys()].sort((a, b) => {
+    const groupA = groups.get(a);
+    const groupB = groups.get(b);
+    return `${groupA.upload_date}_${groupA.utm_medium}_${groupA.utm_source}_${groupA.utm_campaign}_${groupA.utm_content}_${roundSortValue(groupA.round_number)}`.localeCompare(`${groupB.upload_date}_${groupB.utm_medium}_${groupB.utm_source}_${groupB.utm_campaign}_${groupB.utm_content}_${roundSortValue(groupB.round_number)}`);
+  });
+
+  for (const deal of Object.values(db.bitrix_deals ?? {})) {
+    const createdDate = dealCreatedDate(deal);
+    if (!createdDate || !inReportPeriod(db, createdDate)) continue;
+
+    const linkedLead = db.bitrix_leads[String(deal.lead_id || '')] || null;
+    let targetKey = visibleLeadGroupKeyByLeadId.get(String(deal.lead_id || '')) || '';
+
+    if (!targetKey) {
+      const roundNumber = linkedLead ? leadRoundNumber(db, linkedLead) : '';
+      const signatureLead = linkedLead
+        ? groupSignature(linkedLead.utm_medium, linkedLead.utm_source, linkedLead.utm_campaign, linkedLead.utm_content, roundNumber)
+        : '';
+      const signatureDeal = groupSignature(deal.utm_medium, deal.utm_source, deal.utm_campaign, deal.utm_content, roundNumber);
+      const candidates = visibleGroupKeysBySignature.get(signatureLead) ?? visibleGroupKeysBySignature.get(signatureDeal) ?? [];
+      targetKey = candidates.at(-1) || '';
+    }
+
+    if (!targetKey) {
+      const roundNumber = '';
+      targetKey = stableJson({
+        date: createdDate,
+        utm_medium: linkedLead?.utm_medium || deal.utm_medium || '',
+        utm_source: linkedLead?.utm_source || deal.utm_source || '',
+        utm_campaign: linkedLead?.utm_campaign || deal.utm_campaign || '',
+        utm_content: linkedLead?.utm_content || deal.utm_content || '',
+      });
+
+      if (!groups.has(targetKey)) {
+        groups.set(targetKey, {
+          source_type: 'bitrix_only',
+          upload_id: '',
+          upload_date: createdDate,
+          round_number: roundNumber,
+          utm_medium: linkedLead?.utm_medium || deal.utm_medium || '',
+          utm_source: linkedLead?.utm_source || deal.utm_source || '',
+          utm_campaign: linkedLead?.utm_campaign || deal.utm_campaign || '',
+          utm_content: linkedLead?.utm_content || deal.utm_content || '',
+          utm_term: '',
+          leads: [],
+          converted_deals: [],
+        });
+      }
+    }
+
+    groups.get(targetKey).converted_deals.push({
+      ...deal,
+      lead: linkedLead,
+    });
   }
 
   return [...groups.values()]
@@ -1240,14 +1404,14 @@ function buildBitrixBaseReportRows(db) {
         const firstLead = firstLeadForPhoneContent(db, phone, group.utm_content);
         return firstLead && createdLeadIds.has(firstLead.id);
       });
-      const convertedLeads = createdLeads.filter((lead) => isConvertedLead(db, lead));
       const lostLeads = createdLeads.filter((lead) => isLostLead(db, lead));
       const revisionLeads = createdLeads.filter((lead) => isRevisionStatus(db, lead.status_id));
       const workingLeads = createdLeads.filter((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead) && !isRevisionStatus(db, lead.status_id));
-      const convertedPhones = phones.filter((phone) => createdLeads.some((lead) => leadPhones(lead).includes(phone) && isConvertedLead(db, lead)));
+      const convertedDeals = group.converted_deals ?? [];
+      const convertedDealPhones = [...new Set(convertedDeals.flatMap((item) => item.lead ? leadPhones(item.lead) : []).filter(Boolean))];
 
       return {
-        source_type: 'bitrix_api',
+        source_type: group.source_type || 'bitrix_api',
         upload_id: '',
         upload_date: group.upload_date,
         round_number: group.round_number,
@@ -1266,10 +1430,10 @@ function buildBitrixBaseReportRows(db) {
         working_phone_count: workingLeads.length,
         revision_lead_count: revisionLeads.length,
         lost_phone_count: lostLeads.length,
-        converted_phone_count: convertedPhones.length,
-        converted_lead_count: convertedLeads.length,
-        cr_by_phone: percent(convertedPhones.length, phones.length),
-        cr_by_lead: percent(convertedLeads.length, createdLeads.length),
+        converted_phone_count: convertedDealPhones.length,
+        converted_lead_count: convertedDeals.length,
+        cr_by_phone: percent(convertedDealPhones.length, phones.length),
+        cr_by_lead: percent(convertedDeals.length, createdLeads.length),
         calls_total: '',
         calls_unique_phones: '',
         calls_duration_gte_10: '',
@@ -1527,7 +1691,7 @@ function russianMonth(dateIso) {
 function buildSourceSummaryRows(baseRows) {
   const groups = new Map();
 
-  for (const row of baseRows.filter((item) => item.source_type !== 'bitrix_only')) {
+  for (const row of baseRows) {
     const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium);
     const source = sourceLabel(row.utm_medium, row.utm_source);
     const key = stableJson({
@@ -2662,6 +2826,7 @@ async function run() {
   const reportsDir = String(args.out || DEFAULT_REPORTS_DIR);
   const dashboardDir = String(args.dashboard || DEFAULT_DASHBOARD_DIR);
   const db = await loadJson(dbPath, createEmptyDb());
+  db.bitrix_deals ??= {};
   db.bitrix_stage_history ??= {};
   const today = todayIsoDate();
   const syncFrom = resolveDateArg(args['month-current']
@@ -2692,8 +2857,9 @@ async function run() {
   }
 
   if (reportSource === 'bitrix' && !args['skip-bitrix']) {
-    const result = await fetchBitrixLeadsCreatedRange(db, syncFrom, syncTo);
-    console.log(`Bitrix range synced: ${result.leadCount} lead(s), ${result.phoneCount} phone(s), ${result.stageHistoryCount} stage history item(s), period: ${syncFrom}..${syncTo}.`);
+    const leadResult = await fetchBitrixLeadsCreatedRange(db, syncFrom, syncTo);
+    const dealResult = await fetchBitrixDealsCreatedRange(db, syncFrom, syncTo);
+    console.log(`Bitrix range synced: ${leadResult.leadCount} lead(s), ${dealResult.dealCount} deal(s), ${leadResult.phoneCount} phone(s), ${leadResult.stageHistoryCount} stage history item(s), period: ${syncFrom}..${syncTo}.`);
   }
 
   if (!args['skip-bitrix'] && reportSource !== 'bitrix') {
