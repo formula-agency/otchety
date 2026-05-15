@@ -1716,7 +1716,12 @@ function buildSourceSummaryRows(baseRows) {
   }
 
   return [...groups.values()]
-    .sort((a, b) => `${a.period}_${a.source}_${a.segment}`.localeCompare(`${b.period}_${b.source}_${b.segment}`))
+    .sort((a, b) =>
+      (b.uploadVolume - a.uploadVolume)
+      || (b.converted - a.converted)
+      || a.period.localeCompare(b.period)
+      || a.source.localeCompare(b.source)
+      || a.segment.localeCompare(b.segment))
     .map((row) => ({
       ...row,
       cr: ratioValue(row.converted, row.uploadVolume),
@@ -1772,11 +1777,11 @@ function buildIndicatorDetailRows(baseRows) {
     const monthRow = Array.from({ length: 15 }, () => '');
     monthRow[0] = `Итого за ${monthTitle(`${key}-01`)}`;
     monthRow[9] = monthTotals.uploadVolume;
-    monthRow[10] = monthTotals.working;
-    monthRow[11] = monthTotals.revision;
-    monthRow[12] = monthTotals.lost;
-    monthRow[13] = monthTotals.converted;
-    monthRow[14] = monthTotals.cr;
+    monthRow[10] = monthTotals.cr;
+    monthRow[11] = monthTotals.working;
+    monthRow[12] = monthTotals.revision;
+    monthRow[13] = monthTotals.lost;
+    monthRow[14] = monthTotals.converted;
     rows.push(monthRow);
     rowStyles.push({ startRowIndex: sheetRowIndex, endRowIndex: sheetRowIndex + 1, style: 'month' });
     merges.push({ startRow: sheetRowIndex, endRow: sheetRowIndex + 1, startColumn: 0, endColumn: 9 });
@@ -1794,18 +1799,24 @@ function buildIndicatorDetailRows(baseRows) {
       const dayRow = Array.from({ length: 15 }, () => '');
       dayRow[0] = `Итого за день ${date}`;
       dayRow[9] = dayTotals.uploadVolume;
-      dayRow[10] = dayTotals.working;
-      dayRow[11] = dayTotals.revision;
-      dayRow[12] = dayTotals.lost;
-      dayRow[13] = dayTotals.converted;
-      dayRow[14] = dayTotals.cr;
+      dayRow[10] = dayTotals.cr;
+      dayRow[11] = dayTotals.working;
+      dayRow[12] = dayTotals.revision;
+      dayRow[13] = dayTotals.lost;
+      dayRow[14] = dayTotals.converted;
       rows.push(dayRow);
       rowStyles.push({ startRowIndex: sheetRowIndex, endRowIndex: sheetRowIndex + 1, style: 'day' });
       merges.push({ startRow: sheetRowIndex, endRow: sheetRowIndex + 1, startColumn: 0, endColumn: 9 });
       sheetRowIndex += 1;
 
       const dayGroupStart = sheetRowIndex;
-      for (const base of dayRows) {
+      const sortedDayRows = [...dayRows].sort((a, b) =>
+        (uploadVolume(b) - uploadVolume(a))
+        || (Number(b.converted_lead_count || 0) - Number(a.converted_lead_count || 0))
+        || String(a.utm_content || '').localeCompare(String(b.utm_content || ''))
+        || roundSortValue(a.round_number).localeCompare(roundSortValue(b.round_number)));
+
+      for (const base of sortedDayRows) {
         detailCounter += 1;
         const row = Array.from({ length: 15 }, () => '');
         row[0] = detailCounter;
@@ -1818,11 +1829,11 @@ function buildIndicatorDetailRows(baseRows) {
         row[7] = base.upload_date;
         row[8] = base.round_number;
         row[9] = uploadVolume(base);
-        row[10] = base.working_phone_count;
-        row[11] = base.revision_lead_count;
-        row[12] = base.lost_phone_count;
-        row[13] = base.converted_lead_count;
-        row[14] = percentValue(base.cr_by_lead);
+        row[10] = percentValue(base.cr_by_lead);
+        row[11] = base.working_phone_count;
+        row[12] = base.revision_lead_count;
+        row[13] = base.lost_phone_count;
+        row[14] = base.converted_lead_count;
         rows.push(row);
         sheetRowIndex += 1;
       }
@@ -1855,11 +1866,11 @@ function buildIndicatorsValues(baseRows) {
       'Дата создания',
       'Номер круга',
       'Объем загрузки',
+      'CR',
       'В процессе обработки',
       'В доработке',
       'Проиграно',
       'Сконвертировано',
-      'CR',
     ],
     [
       '',
@@ -1904,14 +1915,14 @@ function buildSourceSummaryValues(baseRows) {
   const rows = buildSourceSummaryRows(baseRows);
   return [
     ['Итог по источникам'],
-    ['Период', 'Источник', 'Сегмент', 'Суммарный объем загрузки', 'Сконвертировано лидов', 'CR'],
+    ['Период', 'Источник', 'Сегмент', 'Суммарный объем загрузки', 'CR', 'Сконвертировано лидов'],
     ...rows.map((row) => [
       row.period,
       row.source,
       row.segment,
       row.uploadVolume,
-      row.converted,
       row.cr,
+      row.converted,
     ]),
   ];
 }
@@ -2155,11 +2166,11 @@ function buildGoogleWorksheets(db) {
         { index: 7, format: 'date', startRowIndex: 2 },
         { index: 8, format: 'integer', startRowIndex: 2 },
         { index: 9, format: 'integer', startRowIndex: 2 },
-        { index: 10, format: 'integer', startRowIndex: 2 },
+        { index: 10, format: 'percent', startRowIndex: 2 },
         { index: 11, format: 'integer', startRowIndex: 2 },
         { index: 12, format: 'integer', startRowIndex: 2 },
         { index: 13, format: 'integer', startRowIndex: 2 },
-        { index: 14, format: 'percent', startRowIndex: 2 },
+        { index: 14, format: 'integer', startRowIndex: 2 },
       ],
     },
     {
@@ -2177,8 +2188,8 @@ function buildGoogleWorksheets(db) {
       ],
       columnFormats: [
         { index: 3, format: 'integer', startRowIndex: 2 },
-        { index: 4, format: 'integer', startRowIndex: 2 },
-        { index: 5, format: 'percent', startRowIndex: 2 },
+        { index: 4, format: 'percent', startRowIndex: 2 },
+        { index: 5, format: 'integer', startRowIndex: 2 },
       ],
     },
     {
@@ -2209,7 +2220,7 @@ function buildGoogleWorksheets(db) {
         ['В процессе обработки', 'Лиды загрузки не в финальном успешном, не в финальном проигранном статусе и не в стадиях доработки.'],
         ['В доработке', 'Лиды в стадиях "Перезвонить 30 дн", "Долгосрок от 6 мес.", "Добрифовать", "Прошел бриф", "Предконвертация".'],
         ['Проиграно', 'Лиды загрузки в проигранных статусах.'],
-        ['Сконвертировано', 'Сконвертированные лиды загрузки.'],
+        ['Сконвертировано', 'Количество созданных сделок Bitrix, привязанных к лидам загрузки и созданных в периоде отчета.'],
         ['CR', 'Сконвертировано / Объем загрузки.'],
         ['Дозваниваемость', 'Уникальные телефоны с разговором 10 секунд и больше / уникальные телефоны, по которым были звонки.'],
         ['Пустые метки', 'Лиды без первичных UTM-меток не попадают в отчет по базам.'],

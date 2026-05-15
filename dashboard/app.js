@@ -289,7 +289,12 @@ function summarizeSourceTable(rows) {
       ...row,
       cr: row.uploadVolume > 0 ? row.converted / row.uploadVolume : 0,
     }))
-    .sort((a, b) => `${a.period}_${a.source}_${a.segment}`.localeCompare(`${b.period}_${b.source}_${b.segment}`));
+    .sort((a, b) =>
+      (b.uploadVolume - a.uploadVolume)
+      || (b.converted - a.converted)
+      || a.period.localeCompare(b.period)
+      || a.source.localeCompare(b.source)
+      || a.segment.localeCompare(b.segment));
 }
 
 function renderKpis(rows) {
@@ -368,9 +373,17 @@ function populateDetailDateSelect(rows) {
 
 function detailRowsForView(rows) {
   const dates = uniqueDates(rows);
+  const sortRows = (items) => [...items].sort((a, b) =>
+    (Number(b.uploadVolume || 0) - Number(a.uploadVolume || 0))
+    || (Number(b.converted || 0) - Number(a.converted || 0))
+    || a.uploadDate.localeCompare(b.uploadDate)
+    || (a.sourceLabel || '').localeCompare(b.sourceLabel || '')
+    || (a.baseLabel || '').localeCompare(b.baseLabel || '')
+    || (Number(a.roundNumber || 0) - Number(b.roundNumber || 0)));
+
   if (state.detailDate === 'all') {
     return {
-      rows,
+      rows: sortRows(rows),
       mode: 'all',
       date: '',
     };
@@ -381,7 +394,7 @@ function detailRowsForView(rows) {
     : (dates.includes(state.detailDate) ? state.detailDate : (dates[0] || ''));
 
   return {
-    rows: selectedDate ? rows.filter((row) => row.uploadDate === selectedDate) : rows,
+    rows: sortRows(selectedDate ? rows.filter((row) => row.uploadDate === selectedDate) : rows),
     mode: 'single',
     date: selectedDate,
   };
@@ -417,8 +430,8 @@ function renderSourceSummaryTable(rows) {
         <td>${row.source}</td>
         <td>${row.segment}</td>
         <td>${formatNumber(row.uploadVolume)}</td>
-        <td>${formatNumber(row.converted)}</td>
         <td>${formatPercent(row.cr)}</td>
+        <td>${formatNumber(row.converted)}</td>
       </tr>
     `)
     .join('');
@@ -438,11 +451,11 @@ function renderDetailTable(rows) {
         <td>${row.baseLabel || '—'}</td>
         <td>${formatNumber(row.roundNumber)}</td>
         <td>${formatNumber(row.uploadVolume)}</td>
+        <td>${formatPercent(row.cr)}</td>
         <td>${formatNumber(row.working)}</td>
         <td>${formatNumber(row.revision)}</td>
         <td>${formatNumber(row.lost)}</td>
         <td>${formatNumber(row.converted)}</td>
-        <td>${formatPercent(row.cr)}</td>
       </tr>
     `)
     .join('');
@@ -669,18 +682,18 @@ function renderCharts(rows) {
 }
 
 function exportCsv(rows) {
-  const header = ['Дата', 'Источник', 'База', 'Круг', 'Объем', 'В процессе', 'В доработке', 'Проиграно', 'Сконвертировано', 'CR'];
+  const header = ['Дата', 'Источник', 'База', 'Круг', 'Объем', 'CR', 'В процессе', 'В доработке', 'Проиграно', 'Сконвертировано'];
   const body = rows.map((row) => [
     row.uploadDate,
     row.sourceLabel,
     row.baseLabel,
     row.roundNumber,
     row.uploadVolume,
+    row.cr,
     row.working,
     row.revision,
     row.lost,
     row.converted,
-    row.cr,
   ]);
   const csv = [header, ...body].map((line) => line.map(csvEscape).join(';')).join('\r\n');
   const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
