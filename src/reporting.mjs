@@ -48,6 +48,7 @@ const REVISION_STATUS_NAMES = [
   'Предконвертация',
 ];
 const REVISION_STATUS_FALLBACK_IDS = new Set(['UC_PZNE6G', 'UC_SUU1DX', 'UC_5IFITJ', 'UC_F4HX04', 'UC_RGNREH']);
+const LEAD_IT_DEAL_CATEGORY_ID = '0';
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -736,6 +737,7 @@ function normalizeBitrixDeal(deal) {
   return {
     id: String(deal.ID),
     lead_id: String(deal.LEAD_ID || ''),
+    category_id: String(deal.CATEGORY_ID ?? ''),
     stage_id: deal.STAGE_ID || '',
     date_create: deal.DATE_CREATE || '',
     utm_medium: deal[BITRIX_FIRST_DEAL_UTM_FIELDS.medium] || deal.UTM_MEDIUM || '',
@@ -923,6 +925,7 @@ function bitrixDealSelectParams() {
   const fields = [
     'ID',
     'LEAD_ID',
+    'CATEGORY_ID',
     'STAGE_ID',
     'DATE_CREATE',
     'UTM_MEDIUM',
@@ -938,6 +941,10 @@ function bitrixDealSelectParams() {
   ];
 
   return Object.fromEntries(fields.map((field, index) => [`select[${index}]`, field]));
+}
+
+function isLeadItDeal(deal) {
+  return String(deal?.category_id ?? deal?.CATEGORY_ID ?? '') === LEAD_IT_DEAL_CATEGORY_ID;
 }
 
 async function fetchBitrixLeadsCreatedRange(db, fromIso, toIso) {
@@ -1347,6 +1354,7 @@ function buildBitrixBaseReportRows(db) {
   for (const deal of Object.values(db.bitrix_deals ?? {})) {
     const createdDate = dealCreatedDate(deal);
     if (!createdDate || !inReportPeriod(db, createdDate)) continue;
+    if (!isLeadItDeal(deal)) continue;
 
     const linkedLead = db.bitrix_leads[String(deal.lead_id || '')] || null;
     let targetKey = visibleLeadGroupKeyByLeadId.get(String(deal.lead_id || '')) || '';
@@ -2220,7 +2228,7 @@ function buildGoogleWorksheets(db) {
         ['В процессе обработки', 'Лиды загрузки не в финальном успешном, не в финальном проигранном статусе и не в стадиях доработки.'],
         ['В доработке', 'Лиды в стадиях "Перезвонить 30 дн", "Долгосрок от 6 мес.", "Добрифовать", "Прошел бриф", "Предконвертация".'],
         ['Проиграно', 'Лиды загрузки в проигранных статусах.'],
-        ['Сконвертировано', 'Количество созданных сделок Bitrix, привязанных к лидам загрузки и созданных в периоде отчета.'],
+        ['Сконвертировано', 'Количество созданных сделок Bitrix в воронке LEAD IT, привязанных к лидам загрузки и созданных в периоде отчета.'],
         ['CR', 'Сконвертировано / Объем загрузки.'],
         ['Дозваниваемость', 'Уникальные телефоны с разговором 10 секунд и больше / уникальные телефоны, по которым были звонки.'],
         ['Пустые метки', 'Лиды без первичных UTM-меток не попадают в отчет по базам.'],
