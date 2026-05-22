@@ -28,6 +28,7 @@ const BITRIX_FIRST_DEAL_UTM_FIELDS = {
 const BASE_LABELS = [
   { label: 'Сайты стандартные', tokens: ['site-standard', 'site_standard'] },
   { label: 'Сайты расширенные', tokens: ['site-expanded', 'site_expanded'] },
+  { label: 'Агентства недвижимости', tokens: ['podmenniki_an'] },
   { label: 'Подменники', tokens: ['podmenniki', 'podmenniki_tyumen'] },
   { label: 'Телефоны', tokens: ['phone'] },
   { label: 'SMS', tokens: ['sms'] },
