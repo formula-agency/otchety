@@ -171,12 +171,57 @@ function phoneContentRegistryKey(phone, utmContent) {
   return `${String(phone ?? '').trim()}::${normalizeContentKey(utmContent)}`;
 }
 
+function normalizeUtmToken(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+function baseLabelMatch(value) {
+  const normalized = normalizeUtmToken(value);
+  if (!normalized) return null;
+  return BASE_LABELS.find((item) => item.tokens.some((token) => normalized.includes(normalizeUtmToken(token)))) || null;
+}
+
+const REPORT_UTM_FIELDS = ['utm_content', 'utm_term', 'utm_campaign', 'utm_source', 'utm_medium'];
+
+function reportUtmValues(item) {
+  return REPORT_UTM_FIELDS.map((field) => String(item?.[field] ?? '').trim()).filter(Boolean);
+}
+
+function reportUtmContent(item) {
+  const current = String(item?.utm_content ?? '').trim();
+  if (baseLabelMatch(current)) return current;
+  return reportUtmValues(item).find((value) => baseLabelMatch(value)) || current;
+}
+
+function reportUtmDateValue(item) {
+  const createdDate = String(item?.date_create ?? '').slice(0, 10);
+  const fallbackYear = Number(createdDate.slice(0, 4)) || new Date().getFullYear();
+  return reportUtmValues(item).find((value) => parseDateLike(value, fallbackYear)) || '';
+}
+
+function reportUtmTerm(item) {
+  return reportUtmDateValue(item) || String(item?.utm_term ?? '').trim();
+}
+
+function reportUtmFields(item) {
+  return {
+    utm_medium: item?.utm_medium || '',
+    utm_source: item?.utm_source || '',
+    utm_campaign: item?.utm_campaign || '',
+    utm_content: reportUtmContent(item),
+    utm_term: reportUtmTerm(item),
+  };
+}
+
+function hasReportBaseMarker(item) {
+  return reportUtmValues(item).some((value) => baseLabelMatch(value));
+}
+
 function baseLabel(value) {
   const raw = String(value ?? '').trim();
   if (!raw) return 'Без меток';
 
-  const normalized = raw.toLowerCase().replace(/[\s-]+/g, '_');
-  const match = BASE_LABELS.find((item) => item.tokens.some((token) => normalized.includes(token.toLowerCase().replace(/[\s-]+/g, '_'))));
+  const match = baseLabelMatch(raw);
   return match?.label || raw;
 }
 
@@ -186,8 +231,8 @@ function sourceLabel(utmMedium, utmSource = '') {
   const raw = rawMedium || rawSource;
   if (!raw) return 'Без источника';
 
-  const normalized = raw.toLowerCase().replace(/[\s-]+/g, '_');
-  const match = SOURCE_LABELS.find((item) => item.tokens.some((token) => normalized === token.toLowerCase().replace(/[\s-]+/g, '_')));
+  const normalized = normalizeUtmToken(raw);
+  const match = SOURCE_LABELS.find((item) => item.tokens.some((token) => normalized === normalizeUtmToken(token)));
   return match?.label || raw;
 }
 
@@ -247,7 +292,7 @@ function buildPhoneContentRegistry(db) {
 
   for (const lead of Object.values(db.bitrix_leads)) {
     for (const phone of leadPhones(lead)) {
-      registry.add(phoneContentRegistryKey(phone, lead.utm_content));
+      registry.add(phoneContentRegistryKey(phone, reportUtmContent(lead)));
     }
   }
 
@@ -652,7 +697,8 @@ function leadCreatedDate(lead) {
 function leadUploadDate(lead) {
   const createdDate = leadCreatedDate(lead);
   const fallbackYear = Number(createdDate.slice(0, 4)) || new Date().getFullYear();
-  return parseDateLike(lead?.utm_term, fallbackYear) || createdDate;
+  const utmDateValue = reportUtmDateValue(lead);
+  return parseDateLike(utmDateValue, fallbackYear) || createdDate;
 }
 
 function leadTimestamp(lead) {
@@ -763,7 +809,7 @@ function updatePhoneRegistryFromLead(db, lead) {
   for (const phone of leadPhones(lead)) {
     if (!phone) continue;
     const phoneRecord = ensurePhoneRecord(db, phone);
-    const contentKey = normalizeContentKey(lead.utm_content);
+    const contentKey = normalizeContentKey(reportUtmContent(lead));
 
     const currentFirstLead = db.bitrix_leads[phoneRecord.first_bitrix_lead_id];
     if (!phoneRecord.first_bitrix_lead_id || leadTimestamp(lead) < leadTimestamp(currentFirstLead)) {
@@ -1256,12 +1302,13 @@ function firstLeadForPhoneContent(db, phone, utmContent) {
   const phoneRecord = db.phones[phone];
   const contentKey = normalizeContentKey(utmContent);
   const firstLeadId = phoneRecord?.first_bitrix_lead_id_by_content?.[contentKey];
-  if (firstLeadId && db.bitrix_leads[firstLeadId]) {
-    return db.bitrix_leads[firstLeadId];
+  const firstLead = db.bitrix_leads[firstLeadId];
+  if (firstLead && normalizeContentKey(reportUtmContent(firstLead)) === contentKey) {
+    return firstLead;
   }
 
   return leadsForPhone(db, phone)
-    .filter((lead) => normalizeContentKey(lead.utm_content) === contentKey)
+    .filter((lead) => normalizeContentKey(reportUtmContent(lead)) === contentKey)
     .sort((a, b) => leadTimestamp(a) - leadTimestamp(b))[0] ?? null;
 }
 
@@ -1311,17 +1358,19 @@ function buildBitrixBaseReportRows(db) {
     const uploadDate = leadUploadDate(lead);
     if (!lead || !inReportPeriod(db, uploadDate)) continue;
     if (!hasLeadUtm(lead)) continue;
+    if (!hasReportBaseMarker(lead)) continue;
     if (!isBitrixUploadedLead(lead)) continue;
     const roundNumber = leadRoundNumber(db, lead);
+    const leadUtm = reportUtmFields(lead);
 
     const key = stableJson({
       date: uploadDate,
       round_number: roundNumber,
-      utm_medium: lead.utm_medium,
-      utm_source: lead.utm_source,
-      utm_campaign: lead.utm_campaign,
-      utm_content: lead.utm_content,
-      utm_term: lead.utm_term,
+      utm_medium: leadUtm.utm_medium,
+      utm_source: leadUtm.utm_source,
+      utm_campaign: leadUtm.utm_campaign,
+      utm_content: leadUtm.utm_content,
+      utm_term: leadUtm.utm_term,
     });
 
     if (!groups.has(key)) {
@@ -1329,11 +1378,11 @@ function buildBitrixBaseReportRows(db) {
         upload_id: '',
         upload_date: uploadDate,
         round_number: roundNumber,
-        utm_medium: lead.utm_medium,
-        utm_source: lead.utm_source,
-        utm_campaign: lead.utm_campaign,
-        utm_content: lead.utm_content,
-        utm_term: lead.utm_term,
+        utm_medium: leadUtm.utm_medium,
+        utm_source: leadUtm.utm_source,
+        utm_campaign: leadUtm.utm_campaign,
+        utm_content: leadUtm.utm_content,
+        utm_term: leadUtm.utm_term,
         leads: [],
         converted_deals: [],
       });
@@ -1341,7 +1390,7 @@ function buildBitrixBaseReportRows(db) {
 
     groups.get(key).leads.push(lead);
     visibleLeadGroupKeyByLeadId.set(String(lead.id), key);
-    const signature = groupSignature(lead.utm_medium, lead.utm_source, lead.utm_campaign, lead.utm_content, roundNumber);
+    const signature = groupSignature(leadUtm.utm_medium, leadUtm.utm_source, leadUtm.utm_campaign, leadUtm.utm_content, roundNumber);
     if (!visibleGroupKeysBySignature.has(signature)) visibleGroupKeysBySignature.set(signature, []);
     visibleGroupKeysBySignature.get(signature).push(key);
   }
@@ -1358,14 +1407,17 @@ function buildBitrixBaseReportRows(db) {
     if (!isLeadItDeal(deal)) continue;
 
     const linkedLead = db.bitrix_leads[String(deal.lead_id || '')] || null;
+    if (!hasReportBaseMarker(linkedLead) && !hasReportBaseMarker(deal)) continue;
+    const linkedLeadUtm = linkedLead ? reportUtmFields(linkedLead) : null;
+    const dealUtm = reportUtmFields(deal);
     let targetKey = visibleLeadGroupKeyByLeadId.get(String(deal.lead_id || '')) || '';
 
     if (!targetKey) {
       const roundNumber = linkedLead ? leadRoundNumber(db, linkedLead) : '';
       const signatureLead = linkedLead
-        ? groupSignature(linkedLead.utm_medium, linkedLead.utm_source, linkedLead.utm_campaign, linkedLead.utm_content, roundNumber)
+        ? groupSignature(linkedLeadUtm.utm_medium, linkedLeadUtm.utm_source, linkedLeadUtm.utm_campaign, linkedLeadUtm.utm_content, roundNumber)
         : '';
-      const signatureDeal = groupSignature(deal.utm_medium, deal.utm_source, deal.utm_campaign, deal.utm_content, roundNumber);
+      const signatureDeal = groupSignature(dealUtm.utm_medium, dealUtm.utm_source, dealUtm.utm_campaign, dealUtm.utm_content, roundNumber);
       const candidates = visibleGroupKeysBySignature.get(signatureLead) ?? visibleGroupKeysBySignature.get(signatureDeal) ?? [];
       targetKey = candidates.at(-1) || '';
     }
@@ -1374,10 +1426,10 @@ function buildBitrixBaseReportRows(db) {
       const roundNumber = '';
       targetKey = stableJson({
         date: createdDate,
-        utm_medium: linkedLead?.utm_medium || deal.utm_medium || '',
-        utm_source: linkedLead?.utm_source || deal.utm_source || '',
-        utm_campaign: linkedLead?.utm_campaign || deal.utm_campaign || '',
-        utm_content: linkedLead?.utm_content || deal.utm_content || '',
+        utm_medium: linkedLeadUtm?.utm_medium || dealUtm.utm_medium || '',
+        utm_source: linkedLeadUtm?.utm_source || dealUtm.utm_source || '',
+        utm_campaign: linkedLeadUtm?.utm_campaign || dealUtm.utm_campaign || '',
+        utm_content: linkedLeadUtm?.utm_content || dealUtm.utm_content || '',
       });
 
       if (!groups.has(targetKey)) {
@@ -1386,11 +1438,11 @@ function buildBitrixBaseReportRows(db) {
           upload_id: '',
           upload_date: createdDate,
           round_number: roundNumber,
-          utm_medium: linkedLead?.utm_medium || deal.utm_medium || '',
-          utm_source: linkedLead?.utm_source || deal.utm_source || '',
-          utm_campaign: linkedLead?.utm_campaign || deal.utm_campaign || '',
-          utm_content: linkedLead?.utm_content || deal.utm_content || '',
-          utm_term: '',
+          utm_medium: linkedLeadUtm?.utm_medium || dealUtm.utm_medium || '',
+          utm_source: linkedLeadUtm?.utm_source || dealUtm.utm_source || '',
+          utm_campaign: linkedLeadUtm?.utm_campaign || dealUtm.utm_campaign || '',
+          utm_content: linkedLeadUtm?.utm_content || dealUtm.utm_content || '',
+          utm_term: linkedLeadUtm?.utm_term || dealUtm.utm_term || '',
           leads: [],
           converted_deals: [],
         });
@@ -2131,7 +2183,7 @@ async function writeDashboardFiles(db, baseRows, dashboardDir) {
 }
 
 function buildGoogleWorksheets(db) {
-  const baseRows = buildBaseReportRows(db);
+  const baseRows = buildBaseReportRows(db).filter((row) => hasReportBaseMarker(row));
   const dailyRows = buildCallabilityDailyRows(db);
   const byBaseRows = buildCallabilityByBaseRows(db);
   const detailRows = buildUploadItemsRows(db);
@@ -2224,7 +2276,7 @@ function buildGoogleWorksheets(db) {
       title: 'Методика',
       values: [
         ['Метрика', 'Как считается'],
-        ['Объем загрузки', 'Лиды Битрикса с источником загрузки и указанными первичными UTM-метками. Дата выгрузки берется из utm_term, если там указана дата, иначе из даты создания лида.'],
+        ['Объем загрузки', 'Лиды Битрикса с источником загрузки и указанными первичными UTM-метками. Дата выгрузки берется из первичных UTM-полей, если там указана дата, иначе из даты создания лида.'],
         ['Номер круга', 'Количество входов лида в стадию "Необработанное": первое появление в этой стадии считается первым кругом, каждый возврат из другой стадии в "Необработанное" увеличивает круг на 1.'],
         ['В процессе обработки', 'Лиды загрузки не в финальном успешном, не в финальном проигранном статусе и не в стадиях доработки.'],
         ['В доработке', 'Лиды в стадиях "Перезвонить 30 дн", "Долгосрок от 6 мес.", "Добрифовать", "Прошел бриф", "Предконвертация".'],
@@ -2761,7 +2813,8 @@ async function syncGoogleSheets(db) {
 
 async function generateReports(db, reportsDir, dashboardDir = DEFAULT_DASHBOARD_DIR) {
   const baseRows = buildBaseReportRows(db);
-  await writeCsv(path.join(reportsDir, 'base_report.csv'), baseRows, [
+  const filteredBaseRows = baseRows.filter((row) => hasReportBaseMarker(row));
+  await writeCsv(path.join(reportsDir, 'base_report.csv'), filteredBaseRows, [
     { header: 'Дата загрузки', value: (row) => row.upload_date },
     { header: 'upload_id', value: (row) => row.upload_id },
     { header: 'utm_medium', value: (row) => row.utm_medium },
@@ -2823,10 +2876,10 @@ async function generateReports(db, reportsDir, dashboardDir = DEFAULT_DASHBOARD_
     { header: 'Сконвертирован', value: (row) => row.converted },
   ]);
 
-  await writeDashboardFiles(db, baseRows, dashboardDir);
+  await writeDashboardFiles(db, filteredBaseRows, dashboardDir);
 
   return {
-    baseRows: baseRows.length,
+    baseRows: filteredBaseRows.length,
     dailyRows: dailyRows.length,
     byBaseRows: byBaseRows.length,
     itemRows: itemRows.length,
