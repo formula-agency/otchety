@@ -1375,6 +1375,23 @@ function leadRoundNumber(db, lead) {
   return rounds;
 }
 
+function carryoverSourceSummaryVolume(db, group) {
+  const fallbackYear = Number(String(group.upload_date || '').slice(0, 4)) || new Date().getFullYear();
+  const originalDate = parseDateLike(group.utm_term, fallbackYear);
+  if (!originalDate) return 0;
+
+  return Object.values(db.bitrix_leads ?? {}).filter((lead) => {
+    if (!isBitrixUploadedLead(lead)) return false;
+    if (leadUploadDate(lead) !== originalDate) return false;
+    const leadUtm = reportUtmFields(lead);
+    return leadUtm.utm_medium === group.utm_medium
+      && leadUtm.utm_source === group.utm_source
+      && leadUtm.utm_campaign === group.utm_campaign
+      && leadUtm.utm_content === group.utm_content
+      && leadUtm.utm_term === group.utm_term;
+  }).length;
+}
+
 function buildBitrixBaseReportRows(db) {
   const groups = new Map();
   const visibleLeadGroupKeyByLeadId = new Map();
@@ -1466,6 +1483,7 @@ function buildBitrixBaseReportRows(db) {
         utm_source: linkedLeadUtm?.utm_source || dealUtm.utm_source || '',
         utm_campaign: linkedLeadUtm?.utm_campaign || dealUtm.utm_campaign || '',
         utm_content: linkedLeadUtm?.utm_content || dealUtm.utm_content || '',
+        utm_term: linkedLeadUtm?.utm_term || dealUtm.utm_term || '',
       });
 
       if (!groups.has(targetKey)) {
@@ -1506,6 +1524,13 @@ function buildBitrixBaseReportRows(db) {
       const workingLeads = createdLeads.filter((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead) && !isRevisionStatus(db, lead.status_id));
       const convertedDeals = group.converted_deals ?? [];
       const convertedDealPhones = [...new Set(convertedDeals.flatMap((item) => item.lead ? leadPhones(item.lead) : []).filter(Boolean))];
+      const convertedOnly = createdLeads.length === 0 && convertedDeals.length > 0;
+      const sourceSummaryPeriodDate = convertedOnly
+        ? sourceSummaryOriginalDate(group) || group.upload_date
+        : group.upload_date;
+      const sourceSummaryVolumeKey = convertedOnly
+        ? sourceVolumeKey(group, sourceSummaryPeriodDate)
+        : '';
 
       return {
         source_type: group.source_type || 'bitrix_api',
@@ -1531,6 +1556,9 @@ function buildBitrixBaseReportRows(db) {
         converted_lead_count: convertedDeals.length,
         cr_by_phone: percent(convertedDealPhones.length, phones.length),
         cr_by_lead: percent(convertedDeals.length, createdLeads.length),
+        source_summary_period_date: sourceSummaryPeriodDate,
+        source_summary_volume: convertedOnly ? carryoverSourceSummaryVolume(db, group) : createdLeads.length,
+        source_summary_volume_key: convertedOnly && sourceSummaryVolumeKey ? sourceSummaryVolumeKey : '',
         calls_total: '',
         calls_unique_phones: '',
         calls_duration_gte_10: '',
@@ -1680,14 +1708,31 @@ function roundSortValue(value) {
 }
 
 function sourceSummaryVolume(row) {
-  return Number(uploadVolume(row) ?? 0);
+  return Number(row.source_summary_volume ?? uploadVolume(row) ?? 0);
+}
+
+function sourceVolumeKey(row, uploadDate = row.upload_date) {
+  if (!uploadDate) return '';
+  return stableJson({
+    upload_date: uploadDate,
+    utm_medium: row.utm_medium || '',
+    utm_source: row.utm_source || '',
+    utm_campaign: row.utm_campaign || '',
+    utm_content: row.utm_content || '',
+    utm_term: row.utm_term || '',
+  });
+}
+
+function sourceSummaryOriginalDate(row) {
+  const fallbackYear = Number(String(row.upload_date || '').slice(0, 4)) || new Date().getFullYear();
+  return parseDateLike(row.utm_term, fallbackYear) || '';
 }
 
 function foldConvertedOnlySourceRows(rows) {
   const targetBySource = new Map();
   const targetBySegment = new Map();
 
-  // Keep current-month conversions from old uploads in totals without rendering zero-volume phantom rows.
+  // Keep converted-only rows visible by their true period unless a real volume row can absorb them.
   for (const row of rows) {
     if (Number(row.uploadVolume || 0) <= 0) continue;
 
@@ -1839,6 +1884,12 @@ function russianMonth(dateIso) {
 
 function buildSourceSummaryRows(baseRows) {
   const groups = new Map();
+  const normalVolumeKeys = new Set(
+    baseRows
+      .filter((row) => uploadVolume(row) > 0)
+      .map((row) => sourceVolumeKey(row))
+      .filter(Boolean),
+  );
 
   for (const row of baseRows) {
     const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source);
@@ -1861,11 +1912,21 @@ function buildSourceSummaryRows(baseRows) {
         segment: segmentLabel,
         uploadVolume: 0,
         converted: 0,
+        volumeKeys: new Set(),
       });
     }
 
     const group = groups.get(key);
-    group.uploadVolume += sourceSummaryVolume(row);
+    const volumeKey = row.source_summary_volume_key || '';
+    const volume = volumeKey && normalVolumeKeys.has(volumeKey) ? 0 : sourceSummaryVolume(row);
+    if (volumeKey) {
+      if (!group.volumeKeys.has(volumeKey)) {
+        group.uploadVolume += volume;
+        group.volumeKeys.add(volumeKey);
+      }
+    } else {
+      group.uploadVolume += volume;
+    }
     group.converted += Number(row.converted_lead_count || 0);
   }
 
@@ -2088,6 +2149,11 @@ function buildSourceSummaryValues(baseRows) {
 }
 
 function sourceSummaryPeriodDate(row) {
+  const convertedOnly = uploadVolume(row) === 0 && Number(row.converted_lead_count || 0) > 0;
+  if (convertedOnly) {
+    return row.source_summary_period_date || sourceSummaryOriginalDate(row) || row.upload_date || '';
+  }
+
   return row.upload_date || '';
 }
 
@@ -2294,6 +2360,9 @@ function buildDashboardPayload(db, baseRows) {
       utmTerm: row.utm_term || '',
       sourcePeriod: monthKey(sourceSummaryPeriodDate(row)),
       sourcePeriodLabel: monthTitle(sourceSummaryPeriodDate(row)),
+      sourceSummaryVolume: sourceSummaryVolume(row),
+      sourceSummaryVolumeKey: row.source_summary_volume_key || '',
+      sourceVolumeKey: sourceVolumeKey(row),
       baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
       roundNumber: Number(row.round_number || 0),
       uploadVolume: Number(uploadVolume(row) || 0),

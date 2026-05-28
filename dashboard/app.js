@@ -266,7 +266,7 @@ function foldConvertedOnlySourceRows(rows) {
   const targetBySource = new Map();
   const targetBySegment = new Map();
 
-  // Keep current-month conversions from old uploads in totals without rendering zero-volume phantom rows.
+  // Keep converted-only rows visible by their true period unless a real volume row can absorb them.
   for (const row of rows) {
     if (Number(row.uploadVolume || 0) <= 0) continue;
 
@@ -300,6 +300,12 @@ function foldConvertedOnlySourceRows(rows) {
 
 function summarizeSourceTable(rows) {
   const groups = new Map();
+  const normalVolumeKeys = new Set(
+    rows
+      .filter((row) => Number(row.uploadVolume || 0) > 0)
+      .map((row) => row.sourceVolumeKey || '')
+      .filter(Boolean),
+  );
 
   for (const row of rows) {
     const period = row.sourcePeriodLabel || formatMonth(row.month);
@@ -315,11 +321,23 @@ function summarizeSourceTable(rows) {
         segment,
         uploadVolume: 0,
         converted: 0,
+        volumeKeys: new Set(),
       });
     }
 
     const group = groups.get(key);
-    group.uploadVolume += Number(row.uploadVolume || 0);
+    const volumeKey = row.sourceSummaryVolumeKey || '';
+    const volume = volumeKey && normalVolumeKeys.has(volumeKey)
+      ? 0
+      : Number(row.sourceSummaryVolume ?? row.uploadVolume ?? 0);
+    if (volumeKey) {
+      if (!group.volumeKeys.has(volumeKey)) {
+        group.uploadVolume += volume;
+        group.volumeKeys.add(volumeKey);
+      }
+    } else {
+      group.uploadVolume += Number(row.uploadVolume || 0);
+    }
     group.converted += Number(row.converted || 0);
   }
 
