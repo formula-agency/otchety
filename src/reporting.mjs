@@ -34,7 +34,11 @@ const BASE_LABELS = [
   { label: 'Менеджеры', tokens: ['phone'] },
   { label: 'SMS', tokens: ['sms'] },
   { label: 'Пиксель', tokens: ['pixel'] },
-  { label: 'Реанимация сделки', tokens: ['deal-reanimation', 'deal_reanimation', 'reanimation_deal', 'reanimation_formula'] },
+  { label: 'Реанимация сделки', tokens: ['deal-reanimation', 'deal_reanimation', 'reanimation_deal', 'reanimation_formula', 'reanimation_tyumen-kvalificirovano'] },
+  { label: 'Реанимация лида Формула', tokens: ['reanimation_lead formula', 'reanimation_baza-3-uroven'] },
+  { label: 'Реанимация Тюмень', tokens: ['reanimation_Tyumen'] },
+  { label: 'Реанимация лида', tokens: ['lead_reanim'] },
+  { label: 'Реанимация AiUP', tokens: ['reanimation_AIUP'] },
   { label: 'Реанимация', tokens: ['reanimation', 'reanim'] },
   { label: 'Карты', tokens: ['maps', 'map'] },
 ];
