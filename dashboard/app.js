@@ -262,6 +262,42 @@ function summarizeByRound(rows) {
     });
 }
 
+function foldConvertedOnlySourceRows(rows) {
+  const targetBySource = new Map();
+  const targetBySegment = new Map();
+
+  // Keep current-month conversions from old uploads in totals without rendering zero-volume phantom rows.
+  for (const row of rows) {
+    if (Number(row.uploadVolume || 0) <= 0) continue;
+
+    const sourceKey = `${row.periodKey || ''}__${row.source || ''}`;
+    const segmentKey = `${row.periodKey || ''}__${row.segment || ''}`;
+    const existingSource = targetBySource.get(sourceKey);
+    if (!existingSource || Number(row.uploadVolume || 0) > Number(existingSource.uploadVolume || 0)) {
+      targetBySource.set(sourceKey, row);
+    }
+
+    const existingSegment = targetBySegment.get(segmentKey);
+    if (!existingSegment || Number(row.uploadVolume || 0) > Number(existingSegment.uploadVolume || 0)) {
+      targetBySegment.set(segmentKey, row);
+    }
+  }
+
+  for (const row of rows) {
+    if (Number(row.uploadVolume || 0) !== 0 || Number(row.converted || 0) <= 0) continue;
+
+    const sourceKey = `${row.periodKey || ''}__${row.source || ''}`;
+    const segmentKey = `${row.periodKey || ''}__${row.segment || ''}`;
+    const target = targetBySource.get(sourceKey) || targetBySegment.get(segmentKey);
+    if (!target || target === row) continue;
+
+    target.converted += row.converted;
+    row.omitFromSummary = true;
+  }
+
+  return rows.filter((row) => !row.omitFromSummary);
+}
+
 function summarizeSourceTable(rows) {
   const groups = new Map();
 
@@ -279,25 +315,15 @@ function summarizeSourceTable(rows) {
         segment,
         uploadVolume: 0,
         converted: 0,
-        volumeKeys: new Set(),
       });
     }
 
     const group = groups.get(key);
-    const volume = Number(row.sourceSummaryVolume ?? row.uploadVolume ?? 0);
-    const volumeKey = row.sourceSummaryVolumeKey || '';
-    if (volumeKey) {
-      if (!group.volumeKeys.has(volumeKey)) {
-        group.uploadVolume += volume;
-        group.volumeKeys.add(volumeKey);
-      }
-    } else {
-      group.uploadVolume += volume;
-    }
+    group.uploadVolume += Number(row.uploadVolume || 0);
     group.converted += Number(row.converted || 0);
   }
 
-  return [...groups.values()]
+  return foldConvertedOnlySourceRows([...groups.values()])
     .map((row) => ({
       periodKey: row.periodKey,
       period: row.period,

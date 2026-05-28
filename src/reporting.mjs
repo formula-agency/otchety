@@ -913,6 +913,33 @@ async function syncBitrixStageHistoryForLeads(db, leadIds) {
   return { leadCount: ids.length, historyCount };
 }
 
+async function syncBitrixLeadIds(db, leadIds, webhookUrl = getBitrixWebhookUrl()) {
+  const ids = [...new Set(leadIds.map(String).filter(Boolean))];
+  if (ids.length === 0) return { leadCount: 0 };
+
+  let leadCount = 0;
+
+  for (const group of chunks(ids, BITRIX_BATCH_SIZE)) {
+    const commands = {};
+    group.forEach((id) => {
+      commands[`lead_${id}`] = `crm.lead.get?id=${encodeURIComponent(id)}`;
+    });
+
+    const results = await bitrixBatch(webhookUrl, commands);
+    for (const id of group) {
+      const lead = results[`lead_${id}`];
+      if (!lead) continue;
+
+      const normalized = normalizeBitrixLead(lead);
+      db.bitrix_leads[normalized.id] = normalized;
+      updatePhoneRegistryFromLead(db, normalized);
+      leadCount += 1;
+    }
+  }
+
+  return { leadCount };
+}
+
 async function syncBitrixForPhones(db, phones) {
   if (phones.length === 0) return { leadCount: 0 };
 
@@ -934,23 +961,7 @@ async function syncBitrixForPhones(db, phones) {
   }
 
   const leadIds = [...new Set([...phoneToLeadIds.values()].flat())];
-
-  for (const group of chunks(leadIds, BITRIX_BATCH_SIZE)) {
-    const commands = {};
-    group.forEach((id) => {
-      commands[`lead_${id}`] = `crm.lead.get?id=${encodeURIComponent(id)}`;
-    });
-
-    const results = await bitrixBatch(webhookUrl, commands);
-    for (const id of group) {
-      const lead = results[`lead_${id}`];
-      if (!lead) continue;
-
-      const normalized = normalizeBitrixLead(lead);
-      db.bitrix_leads[normalized.id] = normalized;
-      updatePhoneRegistryFromLead(db, normalized);
-    }
-  }
+  const result = await syncBitrixLeadIds(db, leadIds, webhookUrl);
 
   for (const [phone, ids] of phoneToLeadIds.entries()) {
     if (!db.phones[phone]) continue;
@@ -959,7 +970,7 @@ async function syncBitrixForPhones(db, phones) {
     db.phones[phone].bitrix_lead_ids = [...current].sort((a, b) => Number(a) - Number(b));
   }
 
-  return { leadCount: leadIds.length };
+  return { leadCount: result.leadCount };
 }
 
 function bitrixLeadSelectParams() {
@@ -1078,8 +1089,12 @@ async function fetchBitrixDealsCreatedRange(db, fromIso, toIso) {
     start = data.next ?? null;
   } while (start !== null && start !== undefined);
 
+  const linkedLeadIds = deals.map((deal) => deal.lead_id).filter(Boolean);
+  const linkedLeads = await syncBitrixLeadIds(db, linkedLeadIds, webhookUrl);
+
   return {
     dealCount: deals.length,
+    linkedLeadCount: linkedLeads.leadCount,
   };
 }
 
@@ -1360,23 +1375,6 @@ function leadRoundNumber(db, lead) {
   return rounds;
 }
 
-function carryoverSourceSummaryVolume(db, group) {
-  const fallbackYear = Number(String(group.upload_date || '').slice(0, 4)) || new Date().getFullYear();
-  const originalDate = parseDateLike(group.utm_term, fallbackYear);
-  if (!originalDate) return 0;
-
-  return Object.values(db.bitrix_leads ?? {}).filter((lead) => {
-    if (!isBitrixUploadedLead(lead)) return false;
-    if (leadUploadDate(lead) !== originalDate) return false;
-    const leadUtm = reportUtmFields(lead);
-    return leadUtm.utm_medium === group.utm_medium
-      && leadUtm.utm_source === group.utm_source
-      && leadUtm.utm_campaign === group.utm_campaign
-      && leadUtm.utm_content === group.utm_content
-      && leadUtm.utm_term === group.utm_term;
-  }).length;
-}
-
 function buildBitrixBaseReportRows(db) {
   const groups = new Map();
   const visibleLeadGroupKeyByLeadId = new Map();
@@ -1508,8 +1506,6 @@ function buildBitrixBaseReportRows(db) {
       const workingLeads = createdLeads.filter((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead) && !isRevisionStatus(db, lead.status_id));
       const convertedDeals = group.converted_deals ?? [];
       const convertedDealPhones = [...new Set(convertedDeals.flatMap((item) => item.lead ? leadPhones(item.lead) : []).filter(Boolean))];
-      const convertedOnly = createdLeads.length === 0 && convertedDeals.length > 0;
-      const carryoverVolume = convertedOnly ? carryoverSourceSummaryVolume(db, group) : 0;
 
       return {
         source_type: group.source_type || 'bitrix_api',
@@ -1535,17 +1531,6 @@ function buildBitrixBaseReportRows(db) {
         converted_lead_count: convertedDeals.length,
         cr_by_phone: percent(convertedDealPhones.length, phones.length),
         cr_by_lead: percent(convertedDeals.length, createdLeads.length),
-        source_summary_volume: convertedOnly ? carryoverVolume : createdLeads.length,
-        source_summary_volume_key: convertedOnly && carryoverVolume > 0
-          ? stableJson({
-            upload_date: parseDateLike(group.utm_term, Number(String(group.upload_date || '').slice(0, 4)) || new Date().getFullYear()) || group.upload_date,
-            utm_medium: group.utm_medium,
-            utm_source: group.utm_source,
-            utm_campaign: group.utm_campaign,
-            utm_content: group.utm_content,
-            utm_term: group.utm_term,
-          })
-          : '',
         calls_total: '',
         calls_unique_phones: '',
         calls_duration_gte_10: '',
@@ -1695,7 +1680,55 @@ function roundSortValue(value) {
 }
 
 function sourceSummaryVolume(row) {
-  return Number(row.source_summary_volume ?? uploadVolume(row) ?? 0);
+  return Number(uploadVolume(row) ?? 0);
+}
+
+function foldConvertedOnlySourceRows(rows) {
+  const targetBySource = new Map();
+  const targetBySegment = new Map();
+
+  // Keep current-month conversions from old uploads in totals without rendering zero-volume phantom rows.
+  for (const row of rows) {
+    if (Number(row.uploadVolume || 0) <= 0) continue;
+
+    const sourceKey = stableJson({
+      period_key: row.periodKey || '',
+      source: row.source || '',
+    });
+    const segmentKey = stableJson({
+      period_key: row.periodKey || '',
+      segment: row.segment || '',
+    });
+    const existingSource = targetBySource.get(sourceKey);
+    if (!existingSource || Number(row.uploadVolume || 0) > Number(existingSource.uploadVolume || 0)) {
+      targetBySource.set(sourceKey, row);
+    }
+
+    const existingSegment = targetBySegment.get(segmentKey);
+    if (!existingSegment || Number(row.uploadVolume || 0) > Number(existingSegment.uploadVolume || 0)) {
+      targetBySegment.set(segmentKey, row);
+    }
+  }
+
+  for (const row of rows) {
+    if (Number(row.uploadVolume || 0) !== 0 || Number(row.converted || 0) <= 0) continue;
+
+    const sourceKey = stableJson({
+      period_key: row.periodKey || '',
+      source: row.source || '',
+    });
+    const segmentKey = stableJson({
+      period_key: row.periodKey || '',
+      segment: row.segment || '',
+    });
+    const target = targetBySource.get(sourceKey) || targetBySegment.get(segmentKey);
+    if (!target || target === row) continue;
+
+    target.converted += row.converted;
+    row.omitFromSummary = true;
+  }
+
+  return rows.filter((row) => !row.omitFromSummary);
 }
 
 function yesNo(value) {
@@ -1828,25 +1861,15 @@ function buildSourceSummaryRows(baseRows) {
         segment: segmentLabel,
         uploadVolume: 0,
         converted: 0,
-        volumeKeys: new Set(),
       });
     }
 
     const group = groups.get(key);
-    const volume = sourceSummaryVolume(row);
-    const volumeKey = row.source_summary_volume_key || '';
-    if (volumeKey) {
-      if (!group.volumeKeys.has(volumeKey)) {
-        group.uploadVolume += volume;
-        group.volumeKeys.add(volumeKey);
-      }
-    } else {
-      group.uploadVolume += volume;
-    }
+    group.uploadVolume += sourceSummaryVolume(row);
     group.converted += Number(row.converted_lead_count || 0);
   }
 
-  return [...groups.values()]
+  return foldConvertedOnlySourceRows([...groups.values()])
     .sort((a, b) =>
       b.periodKey.localeCompare(a.periodKey)
       || (b.uploadVolume - a.uploadVolume)
@@ -2065,11 +2088,7 @@ function buildSourceSummaryValues(baseRows) {
 }
 
 function sourceSummaryPeriodDate(row) {
-  const convertedOnly = uploadVolume(row) === 0 && Number(row.converted_lead_count || 0) > 0;
-  if (!convertedOnly) return row.upload_date || '';
-
-  const fallbackYear = Number(String(row.upload_date || '').slice(0, 4)) || new Date().getFullYear();
-  return parseDateLike(row.utm_term, fallbackYear) || row.upload_date || '';
+  return row.upload_date || '';
 }
 
 function buildUtmMarkerSummaryRows(baseRows) {
@@ -2275,8 +2294,6 @@ function buildDashboardPayload(db, baseRows) {
       utmTerm: row.utm_term || '',
       sourcePeriod: monthKey(sourceSummaryPeriodDate(row)),
       sourcePeriodLabel: monthTitle(sourceSummaryPeriodDate(row)),
-      sourceSummaryVolume: sourceSummaryVolume(row),
-      sourceSummaryVolumeKey: row.source_summary_volume_key || '',
       baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
       roundNumber: Number(row.round_number || 0),
       uploadVolume: Number(uploadVolume(row) || 0),
@@ -3110,7 +3127,7 @@ async function run() {
   if (reportSource === 'bitrix' && !args['skip-bitrix']) {
     const leadResult = await fetchBitrixLeadsCreatedRange(db, syncFrom, syncTo);
     const dealResult = await fetchBitrixDealsCreatedRange(db, syncFrom, syncTo);
-    console.log(`Bitrix range synced: ${leadResult.leadCount} lead(s), ${dealResult.dealCount} deal(s), ${leadResult.phoneCount} phone(s), ${leadResult.stageHistoryCount} stage history item(s), period: ${syncFrom}..${syncTo}.`);
+    console.log(`Bitrix range synced: ${leadResult.leadCount} lead(s), ${dealResult.dealCount} deal(s), ${dealResult.linkedLeadCount} linked deal lead(s), ${leadResult.phoneCount} phone(s), ${leadResult.stageHistoryCount} stage history item(s), period: ${syncFrom}..${syncTo}.`);
   }
 
   if (!args['skip-bitrix'] && reportSource !== 'bitrix') {
