@@ -31,7 +31,7 @@ const BASE_LABELS = [
   { label: 'Агентства недвижимости', tokens: ['podmenniki_an'] },
   { label: 'Подменники загородка', tokens: ['podmenniki_country', 'country_real_estate', 'zagorodka', 'загород'] },
   { label: 'Подменники', tokens: ['podmenniki', 'podmenniki_tyumen'] },
-  { label: 'Телефоны', tokens: ['phone'] },
+  { label: 'Менеджеры', tokens: ['phone'] },
   { label: 'SMS', tokens: ['sms'] },
   { label: 'Пиксель', tokens: ['pixel'] },
   { label: 'Реанимация сделки', tokens: ['deal-reanimation', 'deal_reanimation', 'reanimation_deal', 'reanimation_formula'] },
@@ -39,9 +39,11 @@ const BASE_LABELS = [
   { label: 'Карты', tokens: ['maps', 'map'] },
 ];
 const SOURCE_LABELS = [
+  { label: 'Дубли', tokens: ['duplicate_reanim'] },
   { label: 'Media Take', tokens: ['d2'] },
   { label: 'Реанимация', tokens: ['rean'] },
 ];
+const DUPLICATE_SOURCE_TOKENS = ['duplicate_reanim'];
 const REVISION_STATUS_NAMES = [
   'Перезвонить 30 дн',
   'Долгосрок от 6 мес.',
@@ -176,10 +178,25 @@ function normalizeUtmToken(value) {
   return String(value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
 }
 
+function hasUtmToken(value, tokens, mode = 'includes') {
+  const normalized = normalizeUtmToken(value);
+  if (!normalized) return false;
+  return tokens.some((token) => {
+    const normalizedToken = normalizeUtmToken(token);
+    return mode === 'exact'
+      ? normalized === normalizedToken
+      : normalized.includes(normalizedToken);
+  });
+}
+
+function isDuplicateSource(utmSource) {
+  return hasUtmToken(utmSource, DUPLICATE_SOURCE_TOKENS);
+}
+
 function baseLabelMatch(value) {
   const normalized = normalizeUtmToken(value);
   if (!normalized) return null;
-  return BASE_LABELS.find((item) => item.tokens.some((token) => normalized.includes(normalizeUtmToken(token)))) || null;
+  return BASE_LABELS.find((item) => hasUtmToken(normalized, item.tokens)) || null;
 }
 
 const REPORT_UTM_FIELDS = ['utm_content', 'utm_term', 'utm_campaign', 'utm_source', 'utm_medium'];
@@ -218,23 +235,26 @@ function hasReportBaseMarker(item) {
   return reportUtmValues(item).some((value) => baseLabelMatch(value));
 }
 
-function baseLabel(value) {
+function baseLabel(value, utmSource = '') {
   const raw = String(value ?? '').trim();
   if (!raw) return 'Без меток';
 
   const match = baseLabelMatch(raw);
-  return match?.label || raw;
+  const label = match?.label || raw;
+  return isDuplicateSource(utmSource) ? `Дубли ${label}` : label;
 }
 
 function sourceLabel(utmMedium, utmSource = '') {
   const rawMedium = String(utmMedium ?? '').trim();
   const rawSource = String(utmSource ?? '').trim();
-  const raw = rawMedium || rawSource;
+  const raw = rawSource || rawMedium;
   if (!raw) return 'Без источника';
 
-  const normalized = normalizeUtmToken(raw);
-  const match = SOURCE_LABELS.find((item) => item.tokens.some((token) => normalized === normalizeUtmToken(token)));
-  return match?.label || raw;
+  const sourceMatch = SOURCE_LABELS.find((item) => hasUtmToken(rawSource, item.tokens, 'exact'));
+  if (sourceMatch) return sourceMatch.label;
+
+  const mediumMatch = SOURCE_LABELS.find((item) => hasUtmToken(rawMedium, item.tokens, 'exact'));
+  return mediumMatch?.label || rawMedium || rawSource;
 }
 
 function stableJson(value) {
@@ -1754,7 +1774,7 @@ function buildSourceSummaryRows(baseRows) {
   const groups = new Map();
 
   for (const row of baseRows) {
-    const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium);
+    const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source);
     const source = sourceLabel(row.utm_medium, row.utm_source);
     const key = stableJson({
       period: russianMonth(row.upload_date),
@@ -1887,7 +1907,7 @@ function buildIndicatorDetailRows(baseRows) {
         row[3] = base.utm_campaign || '—';
         row[4] = base.utm_content || '—';
         row[5] = base.utm_term || '—';
-        row[6] = baseLabel(base.utm_content || base.utm_source || base.utm_medium);
+        row[6] = baseLabel(base.utm_content || base.utm_source || base.utm_medium, base.utm_source);
         row[7] = base.upload_date;
         row[8] = base.round_number;
         row[9] = uploadVolume(base);
@@ -1989,12 +2009,76 @@ function buildSourceSummaryValues(baseRows) {
   ];
 }
 
+function buildUtmMarkerSummaryRows(baseRows) {
+  const groups = new Map();
+
+  for (const row of baseRows) {
+    const leadCount = uploadVolume(row);
+    if (!leadCount) continue;
+
+    const key = stableJson({
+      upload_date: row.upload_date,
+      group: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
+      utm_medium: row.utm_medium || '',
+      utm_source: row.utm_source || '',
+      utm_campaign: row.utm_campaign || '',
+      utm_content: row.utm_content || '',
+      utm_term: row.utm_term || '',
+    });
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        upload_date: row.upload_date,
+        period: monthTitle(row.upload_date),
+        group: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
+        utm_medium: row.utm_medium || '',
+        utm_source: row.utm_source || '',
+        utm_campaign: row.utm_campaign || '',
+        utm_content: row.utm_content || '',
+        utm_term: row.utm_term || '',
+        lead_count: 0,
+      });
+    }
+
+    groups.get(key).lead_count += leadCount;
+  }
+
+  return [...groups.values()].sort((a, b) =>
+    a.upload_date.localeCompare(b.upload_date)
+    || a.group.localeCompare(b.group)
+    || a.utm_medium.localeCompare(b.utm_medium)
+    || a.utm_source.localeCompare(b.utm_source)
+    || a.utm_campaign.localeCompare(b.utm_campaign)
+    || a.utm_content.localeCompare(b.utm_content)
+    || a.utm_term.localeCompare(b.utm_term));
+}
+
+function buildUtmMarkerSummaryValues(baseRows) {
+  const rows = buildUtmMarkerSummaryRows(baseRows);
+  return [
+    ['', '', '', '', 'Метки', '', '', '', '', ''],
+    ['№', 'Дата загрузки', 'Период', 'Группа', 'utm medium', 'utm source', 'utm campaign', 'utm content', 'utm term', 'Лидов'],
+    ...rows.map((row, index) => [
+      index + 1,
+      row.upload_date,
+      row.period,
+      row.group,
+      row.utm_medium,
+      row.utm_source,
+      row.utm_campaign,
+      row.utm_content,
+      row.utm_term,
+      row.lead_count,
+    ]),
+  ];
+}
+
 function buildReadableCallabilityRows(byBaseRows) {
   return byBaseRows
     .filter((row) => row.first_upload_id !== 'unmatched')
     .map((row) => ({
       date: row.upload_date,
-      base: baseLabel(row.utm_content || row.first_upload_id),
+      base: baseLabel(row.utm_content || row.first_upload_id, row.utm_source),
       calls: row.total,
       uniquePhones: row.unique_phone_count,
       calls10: row.duration_gte_10,
@@ -2126,7 +2210,7 @@ function buildDashboardPayload(db, baseRows) {
       utmCampaign: row.utm_campaign || '',
       utmContent: row.utm_content || '',
       utmTerm: row.utm_term || '',
-      baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium),
+      baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
       roundNumber: Number(row.round_number || 0),
       uploadVolume: Number(uploadVolume(row) || 0),
       working: Number(row.working_phone_count || 0),
@@ -2190,6 +2274,7 @@ function buildGoogleWorksheets(db) {
   const detailRows = buildUploadItemsRows(db);
   const indicatorsSheet = buildIndicatorsValues(baseRows);
   const sourceSummaryValues = buildSourceSummaryValues(baseRows);
+  const utmMarkerSummaryValues = buildUtmMarkerSummaryValues(baseRows);
   const baseColumns = baseSheetColumns();
   const dailyColumns = callabilitySheetColumns('Дата');
   const byBaseColumns = callabilitySheetColumns('first_upload_id');
@@ -2252,6 +2337,29 @@ function buildGoogleWorksheets(db) {
         { index: 3, format: 'integer', startRowIndex: 2 },
         { index: 4, format: 'percent', startRowIndex: 2 },
         { index: 5, format: 'integer', startRowIndex: 2 },
+      ],
+    },
+    {
+      title: 'Сводка по меткам',
+      values: utmMarkerSummaryValues,
+      frozenRows: 2,
+      headerRows: [0, 1],
+      filter: true,
+      filterStartRowIndex: 1,
+      columnWidths: [
+        { startIndex: 0, endIndex: 1, pixelSize: 52 },
+        { startIndex: 1, endIndex: 2, pixelSize: 115 },
+        { startIndex: 2, endIndex: 4, pixelSize: 150 },
+        { startIndex: 4, endIndex: 9, pixelSize: 145 },
+        { startIndex: 9, endIndex: 10, pixelSize: 95 },
+      ],
+      merges: [
+        { startRow: 0, endRow: 1, startColumn: 4, endColumn: 9 },
+      ],
+      columnFormats: [
+        { index: 0, format: 'integer', startRowIndex: 2 },
+        { index: 1, format: 'date', startRowIndex: 2 },
+        { index: 9, format: 'integer', startRowIndex: 2 },
       ],
     },
     {
@@ -2637,13 +2745,14 @@ function formatRequestsForWorksheet(sheet, worksheet, desiredIndex) {
   requests.push(...addRowGroupRequests(sheetId, worksheet));
 
   if (worksheet.filter && rowCount > 1) {
+    const filterStartRowIndex = Number(worksheet.filterStartRowIndex ?? 0);
     requests.push({ clearBasicFilter: { sheetId } });
     requests.push({
       setBasicFilter: {
         filter: {
           range: {
             sheetId,
-            startRowIndex: 0,
+            startRowIndex: filterStartRowIndex,
             endRowIndex: rowCount,
             startColumnIndex: 0,
             endColumnIndex: columnCount,

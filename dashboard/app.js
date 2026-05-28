@@ -32,6 +32,7 @@ const els = {
   activeFilters: document.getElementById('active-filters'),
   selectionSummary: document.getElementById('selection-summary'),
   sourceSummaryBody: document.getElementById('source-summary-body'),
+  utmSummaryBody: document.getElementById('utm-summary-body'),
   detailCaption: document.getElementById('detail-caption'),
   detailDate: document.getElementById('detail-date-select'),
   detailBody: document.getElementById('detail-body'),
@@ -297,6 +298,49 @@ function summarizeSourceTable(rows) {
       || a.segment.localeCompare(b.segment));
 }
 
+function summarizeUtmTable(rows) {
+  const groups = new Map();
+
+  for (const row of rows) {
+    const key = [
+      row.uploadDate,
+      row.baseLabel,
+      row.utmMedium,
+      row.utmSource,
+      row.utmCampaign,
+      row.utmContent,
+      row.utmTerm,
+    ].join('__');
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        uploadDate: row.uploadDate,
+        period: row.monthLabel,
+        group: row.baseLabel || 'Без базы',
+        utmMedium: row.utmMedium || '',
+        utmSource: row.utmSource || '',
+        utmCampaign: row.utmCampaign || '',
+        utmContent: row.utmContent || '',
+        utmTerm: row.utmTerm || '',
+        leadCount: 0,
+      });
+    }
+
+    groups.get(key).leadCount += Number(row.uploadVolume || 0);
+  }
+
+  return [...groups.values()]
+    .filter((row) => row.leadCount > 0)
+    .sort((a, b) =>
+      a.uploadDate.localeCompare(b.uploadDate)
+      || a.group.localeCompare(b.group)
+      || a.utmMedium.localeCompare(b.utmMedium)
+      || a.utmSource.localeCompare(b.utmSource)
+      || a.utmCampaign.localeCompare(b.utmCampaign)
+      || a.utmContent.localeCompare(b.utmContent)
+      || a.utmTerm.localeCompare(b.utmTerm));
+}
+
 function renderKpis(rows) {
   const summary = summarizeRows(rows);
   els.kpiVolume.textContent = formatNumber(summary.uploadVolume);
@@ -432,6 +476,33 @@ function renderSourceSummaryTable(rows) {
         <td>${formatNumber(row.uploadVolume)}</td>
         <td>${formatPercent(row.cr)}</td>
         <td>${formatNumber(row.converted)}</td>
+      </tr>
+    `)
+    .join('');
+}
+
+function renderUtmSummaryTable(rows) {
+  if (!els.utmSummaryBody) return;
+
+  const summaryRows = summarizeUtmTable(rows);
+  if (summaryRows.length === 0) {
+    els.utmSummaryBody.innerHTML = '<tr class="empty-row"><td colspan="10">Нет данных</td></tr>';
+    return;
+  }
+
+  els.utmSummaryBody.innerHTML = summaryRows
+    .map((row, index) => `
+      <tr>
+        <td>${formatNumber(index + 1)}</td>
+        <td>${formatDate(row.uploadDate)}</td>
+        <td>${row.period || '—'}</td>
+        <td>${row.group}</td>
+        <td>${row.utmMedium || '—'}</td>
+        <td>${row.utmSource || '—'}</td>
+        <td>${row.utmCampaign || '—'}</td>
+        <td>${row.utmContent || '—'}</td>
+        <td>${row.utmTerm || '—'}</td>
+        <td>${formatNumber(row.leadCount)}</td>
       </tr>
     `)
     .join('');
@@ -713,6 +784,7 @@ function render() {
   renderKpis(rows);
   renderActiveState(rows);
   renderSourceSummaryTable(rows);
+  renderUtmSummaryTable(rows);
   renderDetailCaption(detailView);
   renderDetailTable(detailView.rows);
   renderCharts(rows);
