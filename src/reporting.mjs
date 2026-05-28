@@ -39,9 +39,8 @@ const BASE_LABELS = [
   { label: 'Карты', tokens: ['maps', 'map'] },
 ];
 const SOURCE_LABELS = [
-  { label: 'Дубли', tokens: ['duplicate_reanim'] },
   { label: 'Media Take', tokens: ['d2'] },
-  { label: 'Реанимация', tokens: ['rean'] },
+  { label: 'Реанимация', tokens: ['deal_reanim', 'duplicate_reanim', 'frml', 'lead_reanim', 'r4', 'rean'] },
 ];
 const DUPLICATE_SOURCE_TOKENS = ['duplicate_reanim'];
 const REVISION_STATUS_NAMES = [
