@@ -1776,15 +1776,17 @@ function buildSourceSummaryRows(baseRows) {
   for (const row of baseRows) {
     const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source);
     const source = sourceLabel(row.utm_medium, row.utm_source);
+    const periodDate = sourceSummaryPeriodDate(row);
+    const period = russianMonth(periodDate);
     const key = stableJson({
-      period: russianMonth(row.upload_date),
+      period,
       source,
       segment: segmentLabel,
     });
 
     if (!groups.has(key)) {
       groups.set(key, {
-        period: russianMonth(row.upload_date),
+        period,
         source,
         segment: segmentLabel,
         uploadVolume: 0,
@@ -2009,6 +2011,14 @@ function buildSourceSummaryValues(baseRows) {
   ];
 }
 
+function sourceSummaryPeriodDate(row) {
+  const convertedOnly = uploadVolume(row) === 0 && Number(row.converted_lead_count || 0) > 0;
+  if (!convertedOnly) return row.upload_date || '';
+
+  const fallbackYear = Number(String(row.upload_date || '').slice(0, 4)) || new Date().getFullYear();
+  return parseDateLike(row.utm_term, fallbackYear) || row.upload_date || '';
+}
+
 function buildUtmMarkerSummaryRows(baseRows) {
   const groups = new Map();
 
@@ -2210,6 +2220,8 @@ function buildDashboardPayload(db, baseRows) {
       utmCampaign: row.utm_campaign || '',
       utmContent: row.utm_content || '',
       utmTerm: row.utm_term || '',
+      sourcePeriod: monthKey(sourceSummaryPeriodDate(row)),
+      sourcePeriodLabel: monthTitle(sourceSummaryPeriodDate(row)),
       baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
       roundNumber: Number(row.round_number || 0),
       uploadVolume: Number(uploadVolume(row) || 0),

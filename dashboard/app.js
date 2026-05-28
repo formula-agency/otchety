@@ -266,7 +266,7 @@ function summarizeSourceTable(rows) {
   const groups = new Map();
 
   for (const row of rows) {
-    const period = formatMonth(row.month);
+    const period = row.sourcePeriodLabel || formatMonth(row.month);
     const source = row.sourceLabel || 'Без источника';
     const segment = row.baseLabel || 'Без базы';
     const key = `${period}__${source}__${segment}`;
