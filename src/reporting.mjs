@@ -1360,6 +1360,23 @@ function leadRoundNumber(db, lead) {
   return rounds;
 }
 
+function carryoverSourceSummaryVolume(db, group) {
+  const fallbackYear = Number(String(group.upload_date || '').slice(0, 4)) || new Date().getFullYear();
+  const originalDate = parseDateLike(group.utm_term, fallbackYear);
+  if (!originalDate) return 0;
+
+  return Object.values(db.bitrix_leads ?? {}).filter((lead) => {
+    if (!isBitrixUploadedLead(lead)) return false;
+    if (leadUploadDate(lead) !== originalDate) return false;
+    const leadUtm = reportUtmFields(lead);
+    return leadUtm.utm_medium === group.utm_medium
+      && leadUtm.utm_source === group.utm_source
+      && leadUtm.utm_campaign === group.utm_campaign
+      && leadUtm.utm_content === group.utm_content
+      && leadUtm.utm_term === group.utm_term;
+  }).length;
+}
+
 function buildBitrixBaseReportRows(db) {
   const groups = new Map();
   const visibleLeadGroupKeyByLeadId = new Map();
@@ -1491,6 +1508,8 @@ function buildBitrixBaseReportRows(db) {
       const workingLeads = createdLeads.filter((lead) => !isConvertedLead(db, lead) && !isLostLead(db, lead) && !isRevisionStatus(db, lead.status_id));
       const convertedDeals = group.converted_deals ?? [];
       const convertedDealPhones = [...new Set(convertedDeals.flatMap((item) => item.lead ? leadPhones(item.lead) : []).filter(Boolean))];
+      const convertedOnly = createdLeads.length === 0 && convertedDeals.length > 0;
+      const carryoverVolume = convertedOnly ? carryoverSourceSummaryVolume(db, group) : 0;
 
       return {
         source_type: group.source_type || 'bitrix_api',
@@ -1516,6 +1535,17 @@ function buildBitrixBaseReportRows(db) {
         converted_lead_count: convertedDeals.length,
         cr_by_phone: percent(convertedDealPhones.length, phones.length),
         cr_by_lead: percent(convertedDeals.length, createdLeads.length),
+        source_summary_volume: convertedOnly ? carryoverVolume : createdLeads.length,
+        source_summary_volume_key: convertedOnly && carryoverVolume > 0
+          ? stableJson({
+            upload_date: parseDateLike(group.utm_term, Number(String(group.upload_date || '').slice(0, 4)) || new Date().getFullYear()) || group.upload_date,
+            utm_medium: group.utm_medium,
+            utm_source: group.utm_source,
+            utm_campaign: group.utm_campaign,
+            utm_content: group.utm_content,
+            utm_term: group.utm_term,
+          })
+          : '',
         calls_total: '',
         calls_unique_phones: '',
         calls_duration_gte_10: '',
@@ -1664,6 +1694,10 @@ function roundSortValue(value) {
   return String(Number(value || 0)).padStart(6, '0');
 }
 
+function sourceSummaryVolume(row) {
+  return Number(row.source_summary_volume ?? uploadVolume(row) ?? 0);
+}
+
 function yesNo(value) {
   return value ? 'Да' : 'Нет';
 }
@@ -1777,8 +1811,10 @@ function buildSourceSummaryRows(baseRows) {
     const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source);
     const source = sourceLabel(row.utm_medium, row.utm_source);
     const periodDate = sourceSummaryPeriodDate(row);
+    const periodKey = monthKey(periodDate);
     const period = russianMonth(periodDate);
     const key = stableJson({
+      period_key: periodKey,
       period,
       source,
       segment: segmentLabel,
@@ -1786,28 +1822,45 @@ function buildSourceSummaryRows(baseRows) {
 
     if (!groups.has(key)) {
       groups.set(key, {
+        periodKey,
         period,
         source,
         segment: segmentLabel,
         uploadVolume: 0,
         converted: 0,
+        volumeKeys: new Set(),
       });
     }
 
     const group = groups.get(key);
-    group.uploadVolume += uploadVolume(row);
+    const volume = sourceSummaryVolume(row);
+    const volumeKey = row.source_summary_volume_key || '';
+    if (volumeKey) {
+      if (!group.volumeKeys.has(volumeKey)) {
+        group.uploadVolume += volume;
+        group.volumeKeys.add(volumeKey);
+      }
+    } else {
+      group.uploadVolume += volume;
+    }
     group.converted += Number(row.converted_lead_count || 0);
   }
 
   return [...groups.values()]
     .sort((a, b) =>
-      (b.uploadVolume - a.uploadVolume)
+      b.periodKey.localeCompare(a.periodKey)
+      || (b.uploadVolume - a.uploadVolume)
       || (b.converted - a.converted)
       || a.period.localeCompare(b.period)
       || a.source.localeCompare(b.source)
       || a.segment.localeCompare(b.segment))
     .map((row) => ({
-      ...row,
+      periodKey: row.periodKey,
+      period: row.period,
+      source: row.source,
+      segment: row.segment,
+      uploadVolume: row.uploadVolume,
+      converted: row.converted,
       cr: ratioValue(row.converted, row.uploadVolume),
     }));
 }
@@ -2222,6 +2275,8 @@ function buildDashboardPayload(db, baseRows) {
       utmTerm: row.utm_term || '',
       sourcePeriod: monthKey(sourceSummaryPeriodDate(row)),
       sourcePeriodLabel: monthTitle(sourceSummaryPeriodDate(row)),
+      sourceSummaryVolume: sourceSummaryVolume(row),
+      sourceSummaryVolumeKey: row.source_summary_volume_key || '',
       baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
       roundNumber: Number(row.round_number || 0),
       uploadVolume: Number(uploadVolume(row) || 0),
@@ -2260,6 +2315,7 @@ function buildDashboardPayload(db, baseRows) {
     },
     dailyRows,
     sourceSummaryRows: sourceSummaryRows.map((row) => ({
+      periodKey: row.periodKey,
       period: row.period,
       source: row.source,
       segment: row.segment,

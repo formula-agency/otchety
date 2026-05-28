@@ -267,31 +267,49 @@ function summarizeSourceTable(rows) {
 
   for (const row of rows) {
     const period = row.sourcePeriodLabel || formatMonth(row.month);
+    const periodKey = row.sourcePeriod || row.month || '';
     const source = row.sourceLabel || 'Без источника';
     const segment = row.baseLabel || 'Без базы';
-    const key = `${period}__${source}__${segment}`;
+    const key = `${periodKey}__${period}__${source}__${segment}`;
     if (!groups.has(key)) {
       groups.set(key, {
+        periodKey,
         period,
         source,
         segment,
         uploadVolume: 0,
         converted: 0,
+        volumeKeys: new Set(),
       });
     }
 
     const group = groups.get(key);
-    group.uploadVolume += Number(row.uploadVolume || 0);
+    const volume = Number(row.sourceSummaryVolume ?? row.uploadVolume ?? 0);
+    const volumeKey = row.sourceSummaryVolumeKey || '';
+    if (volumeKey) {
+      if (!group.volumeKeys.has(volumeKey)) {
+        group.uploadVolume += volume;
+        group.volumeKeys.add(volumeKey);
+      }
+    } else {
+      group.uploadVolume += volume;
+    }
     group.converted += Number(row.converted || 0);
   }
 
   return [...groups.values()]
     .map((row) => ({
-      ...row,
+      periodKey: row.periodKey,
+      period: row.period,
+      source: row.source,
+      segment: row.segment,
+      uploadVolume: row.uploadVolume,
+      converted: row.converted,
       cr: row.uploadVolume > 0 ? row.converted / row.uploadVolume : 0,
     }))
     .sort((a, b) =>
-      (b.uploadVolume - a.uploadVolume)
+      b.periodKey.localeCompare(a.periodKey)
+      || (b.uploadVolume - a.uploadVolume)
       || (b.converted - a.converted)
       || a.period.localeCompare(b.period)
       || a.source.localeCompare(b.source)
