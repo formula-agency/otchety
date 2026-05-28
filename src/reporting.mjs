@@ -43,6 +43,7 @@ const SOURCE_LABELS = [
   { label: 'Реанимация', tokens: ['deal_reanim', 'duplicate_reanim', 'frml', 'lead_reanim', 'r4', 'rean'] },
 ];
 const DUPLICATE_SOURCE_TOKENS = ['duplicate_reanim'];
+const REANIMATION_SOURCE_TOKENS = ['reanimation', 'reanim'];
 const REVISION_STATUS_NAMES = [
   'Перезвонить 30 дн',
   'Долгосрок от 6 мес.',
@@ -243,9 +244,13 @@ function baseLabel(value, utmSource = '') {
   return isDuplicateSource(utmSource) ? `Дубли ${label}` : label;
 }
 
-function sourceLabel(utmMedium, utmSource = '') {
+function sourceLabel(utmMedium, utmSource = '', utmCampaign = '', utmContent = '', utmTerm = '') {
   const rawMedium = String(utmMedium ?? '').trim();
   const rawSource = String(utmSource ?? '').trim();
+  const hasReanimationMarker = [rawMedium, rawSource, utmCampaign, utmContent, utmTerm]
+    .some((value) => hasUtmToken(value, REANIMATION_SOURCE_TOKENS));
+  if (hasReanimationMarker) return 'Реанимация';
+
   const raw = rawSource || rawMedium;
   if (!raw) return 'Без источника';
 
@@ -1892,7 +1897,7 @@ function buildSourceSummaryRows(baseRows) {
 
   for (const row of baseRows) {
     const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source);
-    const source = sourceLabel(row.utm_medium, row.utm_source);
+    const source = sourceLabel(row.utm_medium, row.utm_source, row.utm_campaign, row.utm_content, row.utm_term);
     const periodDate = sourceSummaryPeriodDate(row);
     const periodKey = monthKey(periodDate);
     const period = russianMonth(periodDate);
@@ -2353,7 +2358,7 @@ function buildDashboardPayload(db, baseRows) {
       monthLabel: monthTitle(row.upload_date),
       utmMedium: row.utm_medium || '',
       utmSource: row.utm_source || '',
-      sourceLabel: sourceLabel(row.utm_medium, row.utm_source),
+      sourceLabel: sourceLabel(row.utm_medium, row.utm_source, row.utm_campaign, row.utm_content, row.utm_term),
       utmCampaign: row.utm_campaign || '',
       utmContent: row.utm_content || '',
       utmTerm: row.utm_term || '',
