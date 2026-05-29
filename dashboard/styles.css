@@ -613,6 +613,10 @@ select {
   max-height: 560px;
 }
 
+.table-wrap--converted {
+  max-height: 420px;
+}
+
 .table-wrap--utm {
   max-height: 620px;
 }
@@ -646,6 +650,11 @@ select {
 
 .data-table--details th,
 .data-table--details td {
+  font-size: 12px;
+}
+
+.data-table--converted th,
+.data-table--converted td {
   font-size: 12px;
 }
 
@@ -692,6 +701,32 @@ select {
   width: 9%;
 }
 
+.data-table--converted th:nth-child(1) {
+  width: 11%;
+}
+
+.data-table--converted th:nth-child(2),
+.data-table--converted th:nth-child(3),
+.data-table--converted th:nth-child(6) {
+  width: 9%;
+}
+
+.data-table--converted th:nth-child(4) {
+  width: 20%;
+}
+
+.data-table--converted th:nth-child(5) {
+  width: 13%;
+}
+
+.data-table--converted th:nth-child(7) {
+  width: 14%;
+}
+
+.data-table--converted th:nth-child(8) {
+  width: 15%;
+}
+
 .data-table th {
   position: sticky;
   top: 0;
@@ -721,7 +756,9 @@ select {
 #detail-body td:nth-child(7),
 #detail-body td:nth-child(8),
 #detail-body td:nth-child(9),
-#detail-body td:nth-child(10) {
+#detail-body td:nth-child(10),
+#converted-without-utm-body td:nth-child(2),
+#converted-without-utm-body td:nth-child(3) {
   text-align: right;
 }
 

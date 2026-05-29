@@ -2413,6 +2413,7 @@ function buildDashboardPayload(db, baseRows) {
   const totals = summarizeBaseRows(baseRows);
   const sourceSummaryRows = buildSourceSummaryRows(baseRows);
   const dailyRows = buildDashboardDailyRows(baseRows);
+  const convertedWithoutUtmRows = buildConvertedLeadWithoutUtmRows(db);
   const ranges = {
     from: reportContext(db).from || '',
     to: reportContext(db).to || '',
@@ -2461,6 +2462,8 @@ function buildDashboardPayload(db, baseRows) {
       rows: normalizedBaseRows.length,
       sources: [...new Set(normalizedBaseRows.map((row) => row.sourceLabel).filter(Boolean))].length,
       segments: [...new Set(normalizedBaseRows.map((row) => row.baseLabel).filter(Boolean))].length,
+      convertedWithoutUtm: convertedWithoutUtmRows.length,
+      convertedWithoutUtmIncluded: convertedWithoutUtmRows.filter((row) => row.included_in_report).length,
     },
     filters: {
       months: [...new Set(normalizedBaseRows.map((row) => row.month))].sort(),
@@ -2479,6 +2482,29 @@ function buildDashboardPayload(db, baseRows) {
       uploadVolume: Number(row.uploadVolume || 0),
       converted: Number(row.converted || 0),
       cr: row.cr || 0,
+    })),
+    convertedWithoutUtmRows: convertedWithoutUtmRows.map((row) => ({
+      dealDate: row.deal_date,
+      dealId: row.deal_id,
+      dealStageId: row.deal_stage_id,
+      leadId: row.lead_id,
+      leadDate: row.lead_date,
+      leadTitle: row.lead_title,
+      leadStatus: row.lead_status,
+      leadSourceId: row.lead_source_id,
+      leadPhones: row.lead_phones,
+      includedInReport: Boolean(row.included_in_report),
+      reason: row.reason,
+      leadUtmMedium: row.lead_utm_medium,
+      leadUtmSource: row.lead_utm_source,
+      leadUtmCampaign: row.lead_utm_campaign,
+      leadUtmContent: row.lead_utm_content,
+      leadUtmTerm: row.lead_utm_term,
+      dealUtmMedium: row.deal_utm_medium,
+      dealUtmSource: row.deal_utm_source,
+      dealUtmCampaign: row.deal_utm_campaign,
+      dealUtmContent: row.deal_utm_content,
+      dealUtmTerm: row.deal_utm_term,
     })),
     baseRows: normalizedBaseRows,
   };

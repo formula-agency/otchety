@@ -33,6 +33,8 @@ const els = {
   selectionSummary: document.getElementById('selection-summary'),
   sourceSummaryBody: document.getElementById('source-summary-body'),
   utmSummaryBody: document.getElementById('utm-summary-body'),
+  convertedWithoutUtmCaption: document.getElementById('converted-without-utm-caption'),
+  convertedWithoutUtmBody: document.getElementById('converted-without-utm-body'),
   detailCaption: document.getElementById('detail-caption'),
   detailDate: document.getElementById('detail-date-select'),
   detailBody: document.getElementById('detail-body'),
@@ -166,6 +168,51 @@ function filteredRows() {
       row.utmTerm,
     ].some((field) => normalizeSearch(field).includes(query));
   });
+}
+
+function filteredConvertedWithoutUtmRows() {
+  const query = normalizeSearch(state.search);
+  return (data.convertedWithoutUtmRows || [])
+    .filter((row) => {
+      if (state.dateFrom && row.dealDate < state.dateFrom) return false;
+      if (state.dateTo && row.dealDate > state.dateTo) return false;
+      if (!query) return true;
+
+      return [
+        row.dealId,
+        row.dealStageId,
+        row.leadId,
+        row.leadTitle,
+        row.leadStatus,
+        row.leadSourceId,
+        row.leadPhones,
+        row.reason,
+        row.leadUtmMedium,
+        row.leadUtmSource,
+        row.leadUtmCampaign,
+        row.leadUtmContent,
+        row.leadUtmTerm,
+        row.dealUtmMedium,
+        row.dealUtmSource,
+        row.dealUtmCampaign,
+        row.dealUtmContent,
+        row.dealUtmTerm,
+      ].some((field) => normalizeSearch(field).includes(query));
+    })
+    .sort((a, b) =>
+      (a.dealDate || '').localeCompare(b.dealDate || '')
+      || String(a.dealId || '').localeCompare(String(b.dealId || '')));
+}
+
+function formatUtmParts(row, prefix) {
+  const parts = [
+    row[`${prefix}UtmMedium`],
+    row[`${prefix}UtmSource`],
+    row[`${prefix}UtmCampaign`],
+    row[`${prefix}UtmContent`],
+    row[`${prefix}UtmTerm`],
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(' / ') : '—';
 }
 
 function summarizeRows(rows) {
@@ -594,6 +641,34 @@ function renderDetailTable(rows) {
     .join('');
 }
 
+function renderConvertedWithoutUtmTable(rows) {
+  if (!els.convertedWithoutUtmBody || !els.convertedWithoutUtmCaption) return;
+
+  const included = rows.filter((row) => row.includedInReport).length;
+  const excluded = rows.length - included;
+  els.convertedWithoutUtmCaption.textContent = `Сделок: ${formatNumber(rows.length)} · вне основного отчета: ${formatNumber(excluded)} · попали через UTM сделки: ${formatNumber(included)}`;
+
+  if (rows.length === 0) {
+    els.convertedWithoutUtmBody.innerHTML = '<tr class="empty-row"><td colspan="8">Нет данных</td></tr>';
+    return;
+  }
+
+  els.convertedWithoutUtmBody.innerHTML = rows
+    .map((row) => `
+      <tr>
+        <td>${formatDate(row.dealDate)}</td>
+        <td>${row.dealId || '—'}</td>
+        <td>${row.leadId || '—'}</td>
+        <td>${row.leadTitle || '—'}</td>
+        <td>${row.leadPhones || '—'}</td>
+        <td>${row.includedInReport ? 'Да' : 'Нет'}</td>
+        <td>${row.reason || '—'}</td>
+        <td>${formatUtmParts(row, 'deal')}</td>
+      </tr>
+    `)
+    .join('');
+}
+
 function ensureCharts() {
   if (!dailyChart) {
     dailyChart = new Chart(document.getElementById('daily-chart'), {
@@ -840,6 +915,7 @@ function exportCsv(rows) {
 
 function render() {
   const rows = filteredRows();
+  const convertedWithoutUtmRows = filteredConvertedWithoutUtmRows();
   populateDetailDateSelect(rows);
   const detailView = detailRowsForView(rows);
   renderHero(rows);
@@ -849,6 +925,7 @@ function render() {
   renderUtmSummaryTable(rows);
   renderDetailCaption(detailView);
   renderDetailTable(detailView.rows);
+  renderConvertedWithoutUtmTable(convertedWithoutUtmRows);
   renderCharts(rows);
 }
 
