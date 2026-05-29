@@ -1633,6 +1633,43 @@ function buildUploadItemsRows(db) {
   });
 }
 
+function buildConvertedLeadWithoutUtmRows(db) {
+  return Object.values(db.bitrix_deals ?? {})
+    .filter((deal) => {
+      const createdDate = dealCreatedDate(deal);
+      return createdDate && inReportPeriod(db, createdDate) && isLeadItDeal(deal);
+    })
+    .map((deal) => {
+      const linkedLead = db.bitrix_leads[String(deal.lead_id || '')] || null;
+      return { deal, linkedLead };
+    })
+    .filter(({ linkedLead }) => !hasLeadUtm(linkedLead))
+    .sort((a, b) => `${dealCreatedDate(a.deal)}_${a.deal.id}`.localeCompare(`${dealCreatedDate(b.deal)}_${b.deal.id}`))
+    .map(({ deal, linkedLead }) => ({
+      deal_date: dealCreatedDate(deal),
+      deal_id: deal.id,
+      deal_stage_id: deal.stage_id || '',
+      lead_id: deal.lead_id || '',
+      lead_date: linkedLead ? leadCreatedDate(linkedLead) : '',
+      lead_title: linkedLead?.title || '',
+      lead_status: linkedLead ? leadName(db, linkedLead.status_id) : '',
+      lead_source_id: linkedLead?.source_id || '',
+      lead_phones: linkedLead ? leadPhones(linkedLead).join(', ') : '',
+      included_in_report: hasReportBaseMarker(linkedLead) || hasReportBaseMarker(deal),
+      reason: linkedLead ? 'На лиде нет UTM' : 'Лид не найден',
+      lead_utm_medium: linkedLead?.utm_medium || '',
+      lead_utm_source: linkedLead?.utm_source || '',
+      lead_utm_campaign: linkedLead?.utm_campaign || '',
+      lead_utm_content: linkedLead?.utm_content || '',
+      lead_utm_term: linkedLead?.utm_term || '',
+      deal_utm_medium: deal.utm_medium || '',
+      deal_utm_source: deal.utm_source || '',
+      deal_utm_campaign: deal.utm_campaign || '',
+      deal_utm_content: deal.utm_content || '',
+      deal_utm_term: deal.utm_term || '',
+    }));
+}
+
 function buildCallabilityDailyRows(db) {
   const groups = new Map();
 
@@ -1868,6 +1905,32 @@ function detailSheetColumns() {
     { header: 'utm_campaign', value: (row) => row.utm_campaign },
     { header: 'utm_content', value: (row) => row.utm_content },
     { header: 'utm_term', value: (row) => row.utm_term },
+  ];
+}
+
+function convertedWithoutUtmColumns() {
+  return [
+    { header: 'Дата сделки', value: (row) => row.deal_date, format: 'date' },
+    { header: 'ID сделки', value: (row) => row.deal_id },
+    { header: 'Стадия сделки', value: (row) => row.deal_stage_id },
+    { header: 'ID лида', value: (row) => row.lead_id },
+    { header: 'Дата лида', value: (row) => row.lead_date, format: 'date' },
+    { header: 'Название лида', value: (row) => row.lead_title },
+    { header: 'Статус лида', value: (row) => row.lead_status },
+    { header: 'SOURCE_ID лида', value: (row) => row.lead_source_id },
+    { header: 'Телефоны лида', value: (row) => row.lead_phones },
+    { header: 'Попал в основной отчет', value: (row) => yesNo(row.included_in_report) },
+    { header: 'Причина', value: (row) => row.reason },
+    { header: 'lead utm_medium', value: (row) => row.lead_utm_medium },
+    { header: 'lead utm_source', value: (row) => row.lead_utm_source },
+    { header: 'lead utm_campaign', value: (row) => row.lead_utm_campaign },
+    { header: 'lead utm_content', value: (row) => row.lead_utm_content },
+    { header: 'lead utm_term', value: (row) => row.lead_utm_term },
+    { header: 'deal utm_medium', value: (row) => row.deal_utm_medium },
+    { header: 'deal utm_source', value: (row) => row.deal_utm_source },
+    { header: 'deal utm_campaign', value: (row) => row.deal_utm_campaign },
+    { header: 'deal utm_content', value: (row) => row.deal_utm_content },
+    { header: 'deal utm_term', value: (row) => row.deal_utm_term },
   ];
 }
 
@@ -2434,6 +2497,7 @@ function buildGoogleWorksheets(db) {
   const dailyRows = buildCallabilityDailyRows(db);
   const byBaseRows = buildCallabilityByBaseRows(db);
   const detailRows = buildUploadItemsRows(db);
+  const convertedWithoutUtmRows = buildConvertedLeadWithoutUtmRows(db);
   const indicatorsSheet = buildIndicatorsValues(baseRows);
   const sourceSummaryValues = buildSourceSummaryValues(baseRows);
   const utmMarkerSummaryValues = buildUtmMarkerSummaryValues(baseRows);
@@ -2441,6 +2505,7 @@ function buildGoogleWorksheets(db) {
   const dailyColumns = callabilitySheetColumns('Дата');
   const byBaseColumns = callabilitySheetColumns('first_upload_id');
   const detailColumns = detailSheetColumns();
+  const convertedWithoutUtmSheetColumns = convertedWithoutUtmColumns();
 
   return [
     {
@@ -2525,6 +2590,20 @@ function buildGoogleWorksheets(db) {
       ],
     },
     {
+      title: 'Сконв. без UTM на лиде',
+      values: tableValues(convertedWithoutUtmRows, convertedWithoutUtmSheetColumns),
+      frozenRows: 1,
+      filter: true,
+      columnWidths: [
+        { startIndex: 0, endIndex: 1, pixelSize: 115 },
+        { startIndex: 1, endIndex: 5, pixelSize: 95 },
+        { startIndex: 5, endIndex: 9, pixelSize: 150 },
+        { startIndex: 9, endIndex: 11, pixelSize: 145 },
+        { startIndex: 11, endIndex: 21, pixelSize: 135 },
+      ],
+      columnFormats: columnFormats(convertedWithoutUtmSheetColumns),
+    },
+    {
       title: 'Дозваниваемость',
       values: buildReadableCallabilityValues(db),
       frozenRows: 2,
@@ -2553,6 +2632,7 @@ function buildGoogleWorksheets(db) {
         ['В доработке', 'Лиды в стадиях "Перезвонить 30 дн", "Долгосрок от 6 мес.", "Добрифовать", "Прошел бриф", "Предконвертация".'],
         ['Проиграно', 'Лиды загрузки в проигранных статусах.'],
         ['Сконвертировано', 'Количество созданных сделок Bitrix в воронке LEAD IT, привязанных к лидам загрузки и созданных в периоде отчета.'],
+        ['Сконвертированные без UTM на лиде', 'Отдельный лист со сделками Bitrix в воронке LEAD IT за период, у которых связанный лид не найден или на самом лиде пустые UTM-метки. Если UTM есть на сделке, строка может попадать в основной отчет через метки сделки.'],
         ['CR', 'Сконвертировано / Объем загрузки.'],
         ['Дозваниваемость', 'Уникальные телефоны с разговором 10 секунд и больше / уникальные телефоны, по которым были звонки.'],
         ['Пустые метки', 'Лиды без первичных UTM-меток не попадают в отчет по базам.'],
@@ -3148,6 +3228,13 @@ async function generateReports(db, reportsDir, dashboardDir = DEFAULT_DASHBOARD_
     { header: 'Сконвертирован', value: (row) => row.converted },
   ]);
 
+  const convertedWithoutUtmRows = buildConvertedLeadWithoutUtmRows(db);
+  await writeCsv(
+    path.join(reportsDir, 'converted_without_utm_leads.csv'),
+    convertedWithoutUtmRows,
+    convertedWithoutUtmColumns(),
+  );
+
   await writeDashboardFiles(db, filteredBaseRows, dashboardDir);
 
   return {
@@ -3155,6 +3242,7 @@ async function generateReports(db, reportsDir, dashboardDir = DEFAULT_DASHBOARD_
     dailyRows: dailyRows.length,
     byBaseRows: byBaseRows.length,
     itemRows: itemRows.length,
+    convertedWithoutUtmRows: convertedWithoutUtmRows.length,
   };
 }
 
