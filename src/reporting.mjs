@@ -28,6 +28,10 @@ const BITRIX_FIRST_DEAL_UTM_FIELDS = {
 const BASE_LABELS = [
   { label: 'Сайты стандартные', tokens: ['site-standard', 'site_standard'] },
   { label: 'Сайты расширенные', tokens: ['site-expanded', 'site_expanded'] },
+  { label: 'Семейная ипотека горячие', tokens: ['family_mortgage_tyumen'] },
+  { label: 'Ипотека звонки', tokens: ['mortgage_calls_tyumen'] },
+  { label: 'Сайты и звонки', tokens: ['site_n_calls_tyumen'] },
+  { label: 'Ипотека посетители', tokens: ['mortgage_site_visitors_tyumen'] },
   { label: 'Агентства недвижимости', tokens: ['podmenniki_an'] },
   { label: 'Подменники загородка', tokens: ['podmenniki_country', 'country_real_estate', 'zagorodka', 'загород'] },
   { label: 'Подменники', tokens: ['podmenniki', 'podmenniki_tyumen'] },
@@ -43,6 +47,7 @@ const BASE_LABELS = [
   { label: 'Карты', tokens: ['maps', 'map'] },
 ];
 const SOURCE_LABELS = [
+  { label: 'Хэши МТС', tokens: ['oper', 'r1'] },
   { label: 'Media Take', tokens: ['d2'] },
   { label: 'Реанимация', tokens: ['deal_reanim', 'duplicate_reanim', 'frml', 'lead_reanim', 'r4', 'rean'] },
 ];
