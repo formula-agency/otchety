@@ -12,7 +12,7 @@ on:
       - 'README.md'
       - 'src/**'
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 4,6,8,10,12 * * *'
   workflow_dispatch:
 
 permissions:
