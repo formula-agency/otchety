@@ -37,7 +37,7 @@ const BASE_LABELS = [
   { label: 'Подменники', tokens: ['podmenniki', 'podmenniki_tyumen'] },
   { label: 'Менеджеры', tokens: ['phone'] },
   { label: 'SMS', tokens: ['sms'] },
-  { label: 'Пиксель', tokens: ['pixel'] },
+  { label: 'Пиксель', tokens: ['pixel', 'pixel_tyumen'] },
   { label: 'Реанимация сделки', tokens: ['deal-reanimation', 'deal_reanimation', 'reanimation_deal', 'reanimation_formula', 'reanimation_tyumen-kvalificirovano'] },
   { label: 'Реанимация лида Формула', tokens: ['reanimation_lead formula', 'reanimation_baza-3-uroven'] },
   { label: 'Реанимация Тюмень', tokens: ['reanimation_Tyumen'] },
@@ -47,6 +47,7 @@ const BASE_LABELS = [
   { label: 'Карты', tokens: ['maps', 'map'] },
 ];
 const SOURCE_LABELS = [
+  { label: 'WR', tokens: ['r0'] },
   { label: 'Хэши МТС', tokens: ['oper', 'r1'] },
   { label: 'Media Take', tokens: ['d2'] },
   { label: 'Реанимация', tokens: ['deal_reanim', 'duplicate_reanim', 'frml', 'lead_reanim', 'r4', 'rean'] },
@@ -440,7 +441,7 @@ async function loadJson(filePath, fallback) {
 
 async function saveJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await writeFile(filePath, `${JSON.stringify(value)}\n`, 'utf8');
 }
 
 function createEmptyDb() {
@@ -2520,7 +2521,6 @@ async function writeDashboardFiles(db, baseRows, dashboardDir) {
   const dataDir = path.join(dashboardDir, 'data');
   await mkdir(dataDir, { recursive: true });
   await writeFile(path.join(dataDir, 'report-data.json'), `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
-  await writeFile(path.join(dataDir, 'report-data.js'), `window.REPORT_DASHBOARD_DATA = ${JSON.stringify(payload)};\n`, 'utf8');
 }
 
 function buildGoogleWorksheets(db) {

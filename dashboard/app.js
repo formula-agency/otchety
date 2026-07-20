@@ -1,4 +1,4 @@
-const data = window.REPORT_DASHBOARD_DATA;
+let data = window.REPORT_DASHBOARD_DATA || null;
 
 const state = {
   source: 'all',
@@ -93,18 +93,26 @@ function clampDate(value, minValue, maxValue) {
   return value;
 }
 
+function todayIsoDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function resolveDefaultDateRange(filters = {}) {
   const minDate = filters.minDate || '';
   const maxDate = filters.maxDate || '';
-  if (!maxDate) {
-    return { dateFrom: minDate, dateTo: maxDate };
-  }
-
-  const anchor = new Date(`${maxDate}T00:00:00`);
-  const monthStart = new Date(anchor.getFullYear(), anchor.getMonth(), 1).toISOString().slice(0, 10);
+  const today = todayIsoDate();
+  const currentMonthStart = `${today.slice(0, 7)}-01`;
+  const dateFrom = minDate && currentMonthStart < minDate ? minDate : currentMonthStart;
+  const dateTo = maxDate && maxDate >= dateFrom
+    ? maxDate
+    : today;
   return {
-    dateFrom: clampDate(monthStart, minDate, maxDate),
-    dateTo: maxDate,
+    dateFrom,
+    dateTo,
   };
 }
 
@@ -1006,7 +1014,18 @@ function bindControls() {
   els.exportCsv.addEventListener('click', () => exportCsv(detailRowsForView(filteredRows()).rows));
 }
 
-function init() {
+async function loadDashboardData() {
+  try {
+    const response = await fetch(`./data/report-data.json?v=${Date.now()}`, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    data = await response.json();
+  } catch (error) {
+    data = window.REPORT_DASHBOARD_DATA || null;
+  }
+}
+
+async function init() {
+  await loadDashboardData();
   if (!data) {
     document.body.innerHTML = '<main class="page-shell"><section class="panel"><div class="panel-head"><h2>Нет данных</h2></div></section></main>';
     return;
@@ -1026,9 +1045,9 @@ function init() {
   els.dateFrom.value = state.dateFrom;
   els.dateTo.value = state.dateTo;
   els.dateFrom.min = data.filters.minDate || '';
-  els.dateFrom.max = data.filters.maxDate || '';
+  els.dateFrom.max = todayIsoDate();
   els.dateTo.min = data.filters.minDate || '';
-  els.dateTo.max = data.filters.maxDate || '';
+  els.dateTo.max = todayIsoDate();
 
   bindControls();
   bindHeaderState();
