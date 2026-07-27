@@ -33,6 +33,7 @@ const BASE_LABELS = [
   { label: 'Сайты и звонки', tokens: ['site_n_calls_tyumen'] },
   { label: 'Ипотека посетители', tokens: ['mortgage_site_visitors_tyumen'] },
   { label: 'Агентства недвижимости', tokens: ['podmenniki_an'] },
+  { label: 'Менеджеры загородка', tokens: ['phone_country_real_estate'] },
   { label: 'Подменники загородка', tokens: ['podmenniki_country', 'country_real_estate', 'zagorodka', 'загород'] },
   { label: 'Подменники', tokens: ['podmenniki', 'podmenniki_tyumen'] },
   { label: 'Менеджеры', tokens: ['phone'] },
