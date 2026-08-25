@@ -71,7 +71,12 @@ jobs:
           fi
 
       - name: Update Bitrix base report
+        if: ${{ steps.db-state.outputs.exists == 'true' }}
         run: npm run report:scheduled:base
+
+      - name: Restore Bitrix base report history on cold start
+        if: ${{ steps.db-state.outputs.exists != 'true' }}
+        run: npm run report:scheduled:base:backfill
 
       - name: Update Skorozvon calls for current month on cold start
         if: ${{ steps.db-state.outputs.exists != 'true' }}
