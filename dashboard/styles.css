@@ -394,6 +394,10 @@ select {
   min-width: 0;
 }
 
+.multi-filter {
+  position: relative;
+}
+
 .field span {
   font-size: 12px;
   color: var(--muted);
@@ -410,12 +414,110 @@ select {
   min-width: 0;
 }
 
+.multi-filter__button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.multi-filter__button::after {
+  content: '';
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: -4px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.multi-filter.is-open .multi-filter__button::after {
+  margin-top: 4px;
+  transform: rotate(225deg);
+}
+
+.multi-filter__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multi-filter.has-selection .multi-filter__button {
+  border-color: rgba(47, 140, 255, 0.5);
+  background: rgba(47, 140, 255, 0.06);
+}
+
+.multi-filter__menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  display: none;
+  width: max(100%, 240px);
+  max-height: 300px;
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  box-shadow: 0 18px 48px rgba(22, 20, 20, 0.14);
+}
+
+.multi-filter.is-open .multi-filter__menu {
+  display: grid;
+}
+
+.multi-filter__option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-height: 36px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.multi-filter__option:hover {
+  background: rgba(47, 140, 255, 0.07);
+}
+
+.field .multi-filter__option input {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--blue-strong);
+}
+
+.multi-filter__option span {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 13px;
+}
+
 .field-search {
   min-width: 220px;
 }
 
 .field select:focus,
-.field input:focus {
+.field input:focus,
+.multi-filter__button:focus-visible {
   outline: none;
   border-color: rgba(47, 140, 255, 0.42);
   box-shadow: 0 0 0 4px rgba(102, 172, 255, 0.14);

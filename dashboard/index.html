@@ -72,18 +72,27 @@
 
     <div class="page-shell">
     <section class="filters-band" aria-label="Фильтры">
-      <label class="field">
+      <div class="field multi-filter" id="filter-source">
         <span>Источник</span>
-        <select id="filter-source"></select>
-      </label>
-      <label class="field">
+        <button class="multi-filter__button" type="button" aria-expanded="false">
+          <span class="multi-filter__value">Все источники</span>
+        </button>
+        <div class="multi-filter__menu" role="group" aria-label="Источники"></div>
+      </div>
+      <div class="field multi-filter" id="filter-segment">
         <span>База</span>
-        <select id="filter-segment"></select>
-      </label>
-      <label class="field">
+        <button class="multi-filter__button" type="button" aria-expanded="false">
+          <span class="multi-filter__value">Все базы</span>
+        </button>
+        <div class="multi-filter__menu" role="group" aria-label="Базы"></div>
+      </div>
+      <div class="field multi-filter" id="filter-round">
         <span>Круг</span>
-        <select id="filter-round"></select>
-      </label>
+        <button class="multi-filter__button" type="button" aria-expanded="false">
+          <span class="multi-filter__value">Все круги</span>
+        </button>
+        <div class="multi-filter__menu" role="group" aria-label="Круги"></div>
+      </div>
       <label class="field">
         <span>От</span>
         <input id="filter-date-from" type="date">

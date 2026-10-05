@@ -1,9 +1,9 @@
 let data = window.REPORT_DASHBOARD_DATA || null;
 
 const state = {
-  source: 'all',
-  segment: 'all',
-  round: 'all',
+  sources: [],
+  segments: [],
+  rounds: [],
   dateFrom: '',
   dateTo: '',
   detailDate: 'latest',
@@ -133,19 +133,68 @@ function setText(element, value) {
   if (element) element.textContent = value;
 }
 
-function populateSelect(select, options, allLabel) {
-  select.innerHTML = '';
-  const allOption = document.createElement('option');
-  allOption.value = 'all';
-  allOption.textContent = allLabel;
-  select.append(allOption);
+function selectedValues(root) {
+  return [...root.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value);
+}
+
+function updateMultiFilterLabel(root, values, allLabel) {
+  const label = root.querySelector('.multi-filter__value');
+  if (values.length === 0) {
+    label.textContent = allLabel;
+  } else if (values.length <= 2) {
+    label.textContent = values.join(', ');
+  } else {
+    label.textContent = `Выбрано: ${values.length}`;
+  }
+  root.classList.toggle('has-selection', values.length > 0);
+}
+
+function closeMultiFilters(except = null) {
+  for (const root of [els.source, els.segment, els.round]) {
+    if (root === except) continue;
+    root.classList.remove('is-open');
+    root.querySelector('.multi-filter__button')?.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function populateMultiFilter(root, options, stateKey, allLabel) {
+  const button = root.querySelector('.multi-filter__button');
+  const menu = root.querySelector('.multi-filter__menu');
+  menu.innerHTML = '';
 
   for (const option of options) {
-    const element = document.createElement('option');
-    element.value = String(option);
-    element.textContent = String(option);
-    select.append(element);
+    const text = String(option);
+    const item = document.createElement('label');
+    item.className = 'multi-filter__option';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = text;
+    const caption = document.createElement('span');
+    caption.textContent = text;
+    item.append(checkbox, caption);
+    menu.append(item);
   }
+
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const willOpen = !root.classList.contains('is-open');
+    closeMultiFilters(root);
+    root.classList.toggle('is-open', willOpen);
+    button.setAttribute('aria-expanded', String(willOpen));
+  });
+  menu.addEventListener('click', (event) => event.stopPropagation());
+  menu.addEventListener('change', () => {
+    state[stateKey] = selectedValues(root);
+    updateMultiFilterLabel(root, state[stateKey], allLabel);
+    render();
+  });
+  updateMultiFilterLabel(root, state[stateKey], allLabel);
+}
+
+function resetMultiFilter(root, stateKey, allLabel) {
+  state[stateKey] = [];
+  for (const checkbox of root.querySelectorAll('input[type="checkbox"]')) checkbox.checked = false;
+  updateMultiFilterLabel(root, state[stateKey], allLabel);
 }
 
 function normalizeSearch(value) {
@@ -159,9 +208,9 @@ function uniqueDates(rows) {
 function filteredRows() {
   const query = normalizeSearch(state.search);
   return data.baseRows.filter((row) => {
-    if (state.source !== 'all' && row.sourceLabel !== state.source) return false;
-    if (state.segment !== 'all' && row.baseLabel !== state.segment) return false;
-    if (state.round !== 'all' && String(row.roundNumber) !== state.round) return false;
+    if (state.sources.length > 0 && !state.sources.includes(row.sourceLabel)) return false;
+    if (state.segments.length > 0 && !state.segments.includes(row.baseLabel)) return false;
+    if (state.rounds.length > 0 && !state.rounds.includes(String(row.roundNumber))) return false;
     if (state.dateFrom && row.uploadDate < state.dateFrom) return false;
     if (state.dateTo && row.uploadDate > state.dateTo) return false;
     if (!query) return true;
@@ -487,9 +536,9 @@ function renderHero(rows) {
 
 function renderActiveState(rows) {
   const chips = [];
-  if (state.source !== 'all') chips.push(`Источник: ${state.source}`);
-  if (state.segment !== 'all') chips.push(`База: ${state.segment}`);
-  if (state.round !== 'all') chips.push(`Круг: ${state.round}`);
+  if (state.sources.length > 0) chips.push(`Источники: ${state.sources.join(', ')}`);
+  if (state.segments.length > 0) chips.push(`Базы: ${state.segments.join(', ')}`);
+  if (state.rounds.length > 0) chips.push(`Круги: ${state.rounds.join(', ')}`);
   if (state.dateFrom) chips.push(`От: ${formatDate(state.dateFrom)}`);
   if (state.dateTo) chips.push(`До: ${formatDate(state.dateTo)}`);
   if (normalizeSearch(state.search)) chips.push(`Поиск: ${state.search.trim()}`);
@@ -964,18 +1013,7 @@ function bindHeaderState() {
 }
 
 function bindControls() {
-  els.source.addEventListener('change', () => {
-    state.source = els.source.value;
-    render();
-  });
-  els.segment.addEventListener('change', () => {
-    state.segment = els.segment.value;
-    render();
-  });
-  els.round.addEventListener('change', () => {
-    state.round = els.round.value;
-    render();
-  });
+  document.addEventListener('click', () => closeMultiFilters());
   els.dateFrom.addEventListener('change', () => {
     state.dateFrom = els.dateFrom.value;
     render();
@@ -994,17 +1032,14 @@ function bindControls() {
   });
   els.reset.addEventListener('click', () => {
     const defaultRange = resolveDefaultDateRange(data.filters);
-    state.source = 'all';
-    state.segment = 'all';
-    state.round = 'all';
+    resetMultiFilter(els.source, 'sources', 'Все источники');
+    resetMultiFilter(els.segment, 'segments', 'Все базы');
+    resetMultiFilter(els.round, 'rounds', 'Все круги');
     state.dateFrom = defaultRange.dateFrom;
     state.dateTo = defaultRange.dateTo;
     state.detailDate = 'latest';
     state.search = '';
 
-    els.source.value = 'all';
-    els.segment.value = 'all';
-    els.round.value = 'all';
     els.dateFrom.value = state.dateFrom;
     els.dateTo.value = state.dateTo;
     els.detailDate.value = state.detailDate;
@@ -1038,9 +1073,9 @@ async function init() {
   setText(els.reportPeriod, buildDateRangeLabel(data.report.from, data.report.to));
   setText(els.updatedAt, new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(data.generatedAt)));
 
-  populateSelect(els.source, data.filters.sources, 'Все источники');
-  populateSelect(els.segment, data.filters.segments, 'Все базы');
-  populateSelect(els.round, data.filters.rounds, 'Все круги');
+  populateMultiFilter(els.source, data.filters.sources, 'sources', 'Все источники');
+  populateMultiFilter(els.segment, data.filters.segments, 'segments', 'Все базы');
+  populateMultiFilter(els.round, data.filters.rounds, 'rounds', 'Все круги');
 
   els.dateFrom.value = state.dateFrom;
   els.dateTo.value = state.dateTo;

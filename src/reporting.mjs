@@ -55,6 +55,7 @@ const SOURCE_LABELS = [
   { label: 'WR', tokens: ['r0'] },
   { label: 'Хэши МТС', tokens: ['oper', 'r1'] },
   { label: 'Media Take', tokens: ['d2'] },
+  { label: 'DMP', tokens: ['d1'] },
   { label: 'Реанимация', tokens: ['deal_reanim', 'duplicate_reanim', 'frml', 'lead_reanim', 'r4', 'rean'] },
 ];
 const DUPLICATE_SOURCE_TOKENS = ['duplicate_reanim'];
@@ -288,12 +289,27 @@ function hasReportBaseMarker(item) {
   return values.some((value) => baseLabelMatch(value));
 }
 
-function baseLabel(value, utmSource = '') {
+function isDmpMedium(value) {
+  return hasUtmToken(value, ['d1'], 'exact');
+}
+
+function isExcludedDmpPixel(item) {
+  if (!item) return false;
+  const utm = reportUtmFields(item);
+  return isDmpMedium(utm.utm_medium) && hasUtmToken(utm.utm_content, ['pixel']);
+}
+
+function hasEligibleReportBaseMarker(item) {
+  return hasReportBaseMarker(item) && !isExcludedDmpPixel(item);
+}
+
+function baseLabel(value, utmSource = '', utmMedium = '') {
   const raw = String(value ?? '').trim();
   if (!raw) return 'Без меток';
 
   const match = baseLabelMatch(raw);
-  const label = match?.label || raw;
+  const regularLabel = match?.label || raw;
+  const label = isDmpMedium(utmMedium) ? `${regularLabel} DMP` : regularLabel;
   return isDuplicateSource(utmSource) ? `Дубли ${label}` : label;
 }
 
@@ -1159,7 +1175,7 @@ async function fetchBitrixLeadsCreatedRange(db, fromIso, toIso) {
     start = data.next ?? null;
   } while (start !== null && start !== undefined);
 
-  const reportLeads = leads.filter((lead) => hasReportBaseMarker(lead));
+  const reportLeads = leads.filter((lead) => hasEligibleReportBaseMarker(lead));
   const phones = [...new Set(reportLeads.flatMap((lead) => lead.phones).filter(Boolean))];
   const stageHistory = await syncBitrixStageHistoryForLeads(db, reportLeads.map((lead) => lead.id));
 
@@ -1517,7 +1533,7 @@ function buildBitrixBaseReportRows(db) {
     const uploadDate = leadUploadDate(lead);
     if (!lead || !inReportPeriod(db, uploadDate)) continue;
     if (!hasLeadUtm(lead)) continue;
-    if (!hasReportBaseMarker(lead)) continue;
+    if (!hasEligibleReportBaseMarker(lead)) continue;
     const roundNumber = leadRoundNumber(db, lead);
     const leadUtm = reportUtmFields(lead);
     const key = reportGroupKey(uploadDate, roundNumber, leadUtm);
@@ -1546,10 +1562,10 @@ function buildBitrixBaseReportRows(db) {
     if (!isLeadItDeal(deal)) continue;
 
     const linkedLead = db.bitrix_leads[String(deal.lead_id || '')] || null;
-    if (!hasReportBaseMarker(linkedLead) && !hasReportBaseMarker(deal)) continue;
+    if (!hasEligibleReportBaseMarker(linkedLead) && !hasEligibleReportBaseMarker(deal)) continue;
     const linkedLeadUtm = linkedLead ? reportUtmFields(linkedLead) : null;
     const dealUtm = reportUtmFields(deal);
-    const selectedUtm = hasReportBaseMarker(linkedLead) ? linkedLeadUtm : dealUtm;
+    const selectedUtm = hasEligibleReportBaseMarker(linkedLead) ? linkedLeadUtm : dealUtm;
     const roundNumber = linkedLead ? leadRoundNumber(db, linkedLead) : '';
     const targetKey = reportGroupKey(createdDate, roundNumber, selectedUtm);
 
@@ -1705,7 +1721,7 @@ function buildConvertedLeadWithoutUtmRows(db) {
       lead_status: linkedLead ? leadName(db, linkedLead.status_id) : '',
       lead_source_id: linkedLead?.source_id || '',
       lead_phones: linkedLead ? leadPhones(linkedLead).join(', ') : '',
-      included_in_report: hasReportBaseMarker(linkedLead) || hasReportBaseMarker(deal),
+      included_in_report: hasEligibleReportBaseMarker(linkedLead) || hasEligibleReportBaseMarker(deal),
       reason: linkedLead ? 'На лиде нет UTM' : 'Лид не найден',
       lead_utm_medium: linkedLead?.utm_medium || '',
       lead_utm_source: linkedLead?.utm_source || '',
@@ -2013,7 +2029,7 @@ function buildSourceSummaryRows(baseRows) {
   );
 
   for (const row of baseRows) {
-    const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source);
+    const segmentLabel = baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source, row.utm_medium);
     const source = sourceLabel(row.utm_medium, row.utm_source, row.utm_campaign, row.utm_content, row.utm_term);
     const periodDate = sourceSummaryPeriodDate(row);
     const periodKey = monthKey(periodDate);
@@ -2187,7 +2203,7 @@ function buildIndicatorDetailRows(baseRows) {
         row[3] = base.utm_campaign || '—';
         row[4] = base.utm_content || '—';
         row[5] = base.utm_term || '—';
-        row[6] = baseLabel(base.utm_content || base.utm_source || base.utm_medium, base.utm_source);
+        row[6] = baseLabel(base.utm_content || base.utm_source || base.utm_medium, base.utm_source, base.utm_medium);
         row[7] = base.upload_date;
         row[8] = base.round_number;
         row[9] = uploadVolume(base);
@@ -2302,7 +2318,7 @@ function buildUtmMarkerSummaryRows(baseRows) {
 
     const key = stableJson({
       upload_date: row.upload_date,
-      group: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
+      group: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source, row.utm_medium),
       utm_medium: row.utm_medium || '',
       utm_source: row.utm_source || '',
       utm_campaign: row.utm_campaign || '',
@@ -2314,7 +2330,7 @@ function buildUtmMarkerSummaryRows(baseRows) {
       groups.set(key, {
         upload_date: row.upload_date,
         period: monthTitle(row.upload_date),
-        group: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
+        group: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source, row.utm_medium),
         utm_medium: row.utm_medium || '',
         utm_source: row.utm_source || '',
         utm_campaign: row.utm_campaign || '',
@@ -2362,7 +2378,7 @@ function buildReadableCallabilityRows(byBaseRows) {
     .filter((row) => row.first_upload_id !== 'unmatched')
     .map((row) => ({
       date: row.upload_date,
-      base: baseLabel(row.utm_content || row.first_upload_id, row.utm_source),
+      base: baseLabel(row.utm_content || row.first_upload_id, row.utm_source, row.utm_medium),
       calls: row.total,
       uniquePhones: row.unique_phone_count,
       calls10: row.duration_gte_10,
@@ -2500,7 +2516,7 @@ function buildDashboardPayload(db, baseRows) {
       sourceSummaryVolume: sourceSummaryVolume(row),
       sourceSummaryVolumeKey: row.source_summary_volume_key || '',
       sourceVolumeKey: sourceVolumeKey(row),
-      baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source),
+      baseLabel: baseLabel(row.utm_content || row.utm_source || row.utm_medium, row.utm_source, row.utm_medium),
       roundNumber: Number(row.round_number || 0),
       uploadVolume: Number(uploadVolume(row) || 0),
       working: Number(row.working_phone_count || 0),
@@ -2583,7 +2599,7 @@ async function writeDashboardFiles(db, baseRows, dashboardDir) {
 }
 
 function buildGoogleWorksheets(db) {
-  const baseRows = buildBaseReportRows(db).filter((row) => hasReportBaseMarker(row));
+  const baseRows = buildBaseReportRows(db).filter((row) => hasEligibleReportBaseMarker(row));
   const dailyRows = buildCallabilityDailyRows(db);
   const byBaseRows = buildCallabilityByBaseRows(db);
   const detailRows = buildUploadItemsRows(db);
@@ -3255,7 +3271,7 @@ async function syncGoogleSheets(db) {
 
 async function generateReports(db, reportsDir, dashboardDir = DEFAULT_DASHBOARD_DIR) {
   const baseRows = buildBaseReportRows(db);
-  const filteredBaseRows = baseRows.filter((row) => hasReportBaseMarker(row));
+  const filteredBaseRows = baseRows.filter((row) => hasEligibleReportBaseMarker(row));
   const validatedTotals = validateBaseReportTotals(filteredBaseRows);
   await writeCsv(path.join(reportsDir, 'base_report.csv'), filteredBaseRows, [
     { header: 'Дата загрузки', value: (row) => row.upload_date },
