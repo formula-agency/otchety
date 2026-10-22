@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { google } from 'googleapis';
 import path from 'node:path';
 
@@ -505,7 +505,63 @@ async function loadJson(filePath, fallback) {
 
 async function saveJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value)}\n`, 'utf8');
+  const streamedKeys = new Set([
+    'phones',
+    'bitrix_leads',
+    'bitrix_deals',
+    'bitrix_statuses',
+    'bitrix_stage_history',
+    'skorozvon_calls',
+  ]);
+  const file = await open(filePath, 'w');
+
+  try {
+    await file.write('{');
+    let firstTopLevelEntry = true;
+
+    for (const [key, item] of Object.entries(value)) {
+      if (!firstTopLevelEntry) await file.write(',');
+      firstTopLevelEntry = false;
+      await file.write(`${JSON.stringify(key)}:`);
+
+      if (!streamedKeys.has(key) || !item || typeof item !== 'object' || Array.isArray(item)) {
+        await file.write(JSON.stringify(item));
+        continue;
+      }
+
+      await file.write('{');
+      let firstMapEntry = true;
+      let chunk = '';
+      for (const [mapKey, mapValue] of Object.entries(item)) {
+        chunk += `${firstMapEntry ? '' : ','}${JSON.stringify(mapKey)}:${JSON.stringify(mapValue)}`;
+        firstMapEntry = false;
+        if (chunk.length >= 1024 * 1024) {
+          await file.write(chunk);
+          chunk = '';
+        }
+      }
+      if (chunk) await file.write(chunk);
+      await file.write('}');
+    }
+
+    await file.write('}\n');
+  } finally {
+    await file.close();
+  }
+}
+
+function compactStageHistory(items) {
+  const compacted = [];
+  let previousStatus = null;
+
+  for (const item of [...items].sort((a, b) => `${a.created_time}_${a.id}`.localeCompare(`${b.created_time}_${b.id}`))) {
+    const status = String(item.status_id || '');
+    if (status === previousStatus) continue;
+    compacted.push(item);
+    previousStatus = status;
+  }
+
+  return compacted;
 }
 
 function compactReportingDb(db) {
@@ -518,7 +574,8 @@ function compactReportingDb(db) {
         && (leadCreatedDate(lead) >= DEFAULT_REPORT_HISTORY_FROM || leadUploadDate(lead) >= DEFAULT_REPORT_HISTORY_FROM))));
   const keptLeadIds = new Set(Object.keys(keptLeads));
   const keptHistory = Object.fromEntries(Object.entries(db.bitrix_stage_history ?? {})
-    .filter(([leadId]) => keptLeadIds.has(String(leadId))));
+    .filter(([leadId]) => keptLeadIds.has(String(leadId)))
+    .map(([leadId, items]) => [leadId, compactStageHistory(items)]));
   const uploadPhones = new Set((db.upload_items ?? []).map((item) => item.phone).filter(Boolean));
   const callPhones = new Set(Object.values(db.skorozvon_calls ?? {})
     .filter((call) => call.date >= DEFAULT_REPORT_HISTORY_FROM)
