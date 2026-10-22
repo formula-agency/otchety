@@ -59,6 +59,7 @@ const SOURCE_LABELS = [
   { label: 'Реанимация', tokens: ['deal_reanim', 'duplicate_reanim', 'frml', 'lead_reanim', 'r4', 'rean'] },
 ];
 const DUPLICATE_SOURCE_TOKENS = ['duplicate_reanim'];
+const AIUP_SOURCE_TOKENS = ['reanimation_aiup'];
 const REANIMATION_SOURCE_TOKENS = ['reanimation', 'reanim'];
 const REVISION_STATUS_NAMES = [
   'Перезвонить 30 дн',
@@ -316,7 +317,11 @@ function baseLabel(value, utmSource = '', utmMedium = '') {
 function sourceLabel(utmMedium, utmSource = '', utmCampaign = '', utmContent = '', utmTerm = '') {
   const rawMedium = String(utmMedium ?? '').trim();
   const rawSource = String(utmSource ?? '').trim();
-  const hasReanimationMarker = [rawMedium, rawSource, utmCampaign, utmContent, utmTerm]
+  const sourceValues = [rawMedium, rawSource, utmCampaign, utmContent, utmTerm];
+  const hasAiUpMarker = sourceValues.some((value) => hasUtmToken(value, AIUP_SOURCE_TOKENS));
+  if (hasAiUpMarker) return 'AiUp';
+
+  const hasReanimationMarker = sourceValues
     .some((value) => hasUtmToken(value, REANIMATION_SOURCE_TOKENS));
   if (hasReanimationMarker) return 'Реанимация';
 
