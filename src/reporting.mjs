@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { google } from 'googleapis';
 import path from 'node:path';
+import chain from 'stream-chain';
+import { parser as streamJsonParser } from 'stream-json';
+import { streamObject } from 'stream-json/streamers/stream-object.js';
 
 const DEFAULT_DB_PATH = 'data/reporting-db.json';
 const DEFAULT_REPORTS_DIR = 'reports';
@@ -499,8 +502,19 @@ function mode(values) {
 
 async function loadJson(filePath, fallback) {
   if (!existsSync(filePath)) return fallback;
-  const text = await readFile(filePath, 'utf8');
-  return JSON.parse(text);
+
+  const result = {};
+  const pipeline = chain([
+    createReadStream(filePath, { encoding: 'utf8' }),
+    streamJsonParser(),
+    streamObject(),
+  ]);
+
+  for await (const { key, value } of pipeline) {
+    result[key] = value;
+  }
+
+  return result;
 }
 
 async function saveJson(filePath, value) {
