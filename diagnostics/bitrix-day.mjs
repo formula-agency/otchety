@@ -60,13 +60,15 @@ try {
   const statuses = await list('crm.status.list', { filter: { ENTITY_ID: 'STATUS' } }, (data) => data.result || []);
   const ids = statuses.filter((s) => String(s.NAME || '').trim().toLowerCase() === 'необработанное').map((s) => String(s.STATUS_ID));
   console.log('UNPROCESSED_STATUSES', JSON.stringify(ids));
+  if (ids.length !== 1) throw new Error('Unprocessed stage is ambiguous');
   const events = await list('crm.stagehistory.list', {
     entityTypeId: 1,
-    filter: { '>=CREATED_TIME': `${date}T00:00:00+05:00`, '<CREATED_TIME': '2026-11-12T00:00:00+05:00' },
+    filter: { '>=CREATED_TIME': `${date}T00:00:00+05:00`, '<CREATED_TIME': '2026-11-12T00:00:00+05:00', STATUS_ID: ids[0], TYPE_ID: 2 },
     select: ['ID', 'OWNER_ID', 'TYPE_ID', 'STATUS_ID', 'CREATED_TIME'],
   }, (data) => data.result?.items || [], (page) => {
-    if (page.some((e) => !(Date.parse(e.CREATED_TIME) >= from && Date.parse(e.CREATED_TIME) < to))) {
-      throw new Error('History date filter was not applied');
+    if (page.some((e) => !(Date.parse(e.CREATED_TIME) >= from && Date.parse(e.CREATED_TIME) < to)
+      || String(e.STATUS_ID) !== ids[0] || String(e.TYPE_ID) !== '2')) {
+      throw new Error('History filter was not applied');
     }
   });
   const badDates = events.filter((e) => !(Date.parse(e.CREATED_TIME) >= from && Date.parse(e.CREATED_TIME) < to)).length;
