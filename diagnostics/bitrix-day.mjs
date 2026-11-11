@@ -20,12 +20,14 @@ async function call(method, params) {
   throw new Error(`${method}: retry limit exceeded`);
 }
 
-async function list(method, params, extract) {
+async function list(method, params, extract, validate = () => {}) {
   const rows = [];
   let start = 0;
   do {
     const data = await call(method, { ...params, start });
-    rows.push(...extract(data));
+    const page = extract(data);
+    validate(page, data);
+    rows.push(...page);
     start = data.next ?? null;
   } while (start !== null);
   return rows;
@@ -56,13 +58,17 @@ console.log('CREATED_LEADS', JSON.stringify({ count: leads.length, groups, measu
 
 try {
   const statuses = await list('crm.status.list', { filter: { ENTITY_ID: 'STATUS' } }, (data) => data.result || []);
-  const ids = statuses.filter((s) => String(s.STATUS_ID) === 'NEW' || /необработан/i.test(String(s.NAME))).map((s) => String(s.STATUS_ID));
+  const ids = statuses.filter((s) => String(s.NAME || '').trim().toLowerCase() === 'необработанное').map((s) => String(s.STATUS_ID));
   console.log('UNPROCESSED_STATUSES', JSON.stringify(ids));
   const events = await list('crm.stagehistory.list', {
     entityTypeId: 1,
     filter: { '>=CREATED_TIME': `${date}T00:00:00+05:00`, '<CREATED_TIME': '2026-11-12T00:00:00+05:00' },
     select: ['ID', 'OWNER_ID', 'TYPE_ID', 'STATUS_ID', 'CREATED_TIME'],
-  }, (data) => data.result?.items || []);
+  }, (data) => data.result?.items || [], (page) => {
+    if (page.some((e) => !(Date.parse(e.CREATED_TIME) >= from && Date.parse(e.CREATED_TIME) < to))) {
+      throw new Error('History date filter was not applied');
+    }
+  });
   const badDates = events.filter((e) => !(Date.parse(e.CREATED_TIME) >= from && Date.parse(e.CREATED_TIME) < to)).length;
   if (badDates) throw new Error(`History date filter returned ${badDates} out-of-range records; counts unavailable`);
   const returns = events.filter((e) => ids.includes(String(e.STATUS_ID)) && String(e.TYPE_ID) === '2');
