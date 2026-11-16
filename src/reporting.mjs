@@ -846,26 +846,44 @@ async function importUploadCsv(db, sourceFile, options) {
 }
 
 async function postForm(url, params) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(params),
-  });
-  const text = await response.text();
-  let data;
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let response;
+    let text;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(params),
+      });
+      text = await response.text();
+    } catch (error) {
+      if (attempt === maxAttempts) throw new Error(`Bitrix network request failed after ${maxAttempts} attempts: ${error.message}`);
+      console.warn(`Bitrix network request failed; retrying (${attempt}/${maxAttempts}).`);
+      await sleep(1000 * 2 ** (attempt - 1));
+      continue;
+    }
 
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = { raw: text };
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+
+    if (!response.ok || data.error) {
+      const retryable = response.status === 429 || response.status >= 500 || data.error === 'QUERY_LIMIT_EXCEEDED';
+      if (retryable && attempt < maxAttempts) {
+        console.warn(`Bitrix request temporarily unavailable (${response.status}); retrying (${attempt}/${maxAttempts}).`);
+        await sleep(1000 * 2 ** (attempt - 1));
+        continue;
+      }
+      const detail = data.error_description || data.error || text;
+      throw new Error(`Request failed ${response.status}: ${detail}`);
+    }
+
+    return data;
   }
-
-  if (!response.ok || data.error) {
-    const detail = data.error_description || data.error || text;
-    throw new Error(`Request failed ${response.status}: ${detail}`);
-  }
-
-  return data;
 }
 
 async function bitrixCall(webhookUrl, method, params) {
