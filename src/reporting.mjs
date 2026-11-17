@@ -42,6 +42,7 @@ const BASE_LABELS = [
   { label: 'Онлайн подменники', tokens: ['podmenniki_online'] },
   { label: 'Онлайн карты', tokens: ['maps_online'] },
   { label: 'Авито подменники', tokens: ['podmenniki_avito'] },
+  { label: 'Мать и Дитя подменники', tokens: ['podmenniki_mid'] },
   { label: 'Подменники', tokens: ['podmenniki', 'podmenniki_tyumen'] },
   { label: 'Менеджеры', tokens: ['phone'] },
   { label: 'SMS', tokens: ['sms'] },
